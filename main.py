@@ -218,14 +218,29 @@ def submit_to_ghl_form(name, phone, email, about_case):
                     print(f"⚠ Failed to fill phone field: {e}")
                     # Phone is optional, so continue
             
-            # Fill the case description (textarea with new ID)
+            # Fill the case description (textarea with updated ID)
             try:
-                frame.fill('textarea[name="kS6tzvoRgJHAKxaZY2Ls"]', about_case, timeout=5000)
+                frame.fill('textarea[name="YzYpYdqxuttqzK5GsJDW"]', about_case, timeout=5000)
                 print(f"✓ Filled case description field")
                 success_count += 1
             except Exception as e:
                 print(f"⚠ Failed to fill case description field: {e}")
-                # Continue even if this fails
+                # This field is required, so try alternative selectors
+                try:
+                    frame.fill('textarea[data-q="brief_description_of_your_situation"]', about_case, timeout=5000)
+                    print(f"✓ Filled case description using data-q selector")
+                    success_count += 1
+                except Exception as e2:
+                    print(f"⚠ Alternative selector also failed: {e2}")
+                    # Try any textarea
+                    try:
+                        frame.fill('textarea', about_case, timeout=3000)
+                        print(f"✓ Filled case description using generic textarea selector")
+                        success_count += 1
+                    except Exception as e3:
+                        print(f"✗ All textarea selectors failed: {e3}")
+                        # This is required, so we need to fail
+                        return False
             
             print(f"Successfully filled {success_count} fields")
             
