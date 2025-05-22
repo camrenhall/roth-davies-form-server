@@ -220,7 +220,7 @@ def submit_to_ghl_form(name, phone, email, about_case):
             
             # Fill the case description (textarea with new ID)
             try:
-                frame.fill('textarea[name="YzYpYdqxuttqzK5GsJDW"]', about_case, timeout=5000)
+                frame.fill('textarea[name="kS6tzvoRgJHAKxaZY2Ls"]', about_case, timeout=5000)
                 print(f"✓ Filled case description field")
                 success_count += 1
             except Exception as e:
