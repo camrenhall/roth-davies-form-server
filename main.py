@@ -24,8 +24,39 @@ def debug_form():
 
 def inspect_form_structure():
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                '--no-sandbox',
+                '--disable-blink-features=AutomationControlled',
+                '--disable-dev-shm-usage',
+                '--disable-web-security',
+                '--disable-features=VizDisplayCompositor'
+            ]
+        )
+        
+        # Create a more human-like browser context
+        context = browser.new_context(
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            viewport={'width': 1366, 'height': 768}
+        )
+        
+        page = context.new_page()
+        
+        # Remove webdriver traces
+        page.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined,
+            });
+            
+            window.chrome = {
+                runtime: {},
+            };
+            
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => [1, 2, 3, 4, 5],
+            });
+        """)
         
         try:
             print("Loading page...")
@@ -86,6 +117,10 @@ def inspect_form_structure():
             print(f"Error inspecting form: {e}")
             return {"error": str(e)}
         finally:
+            try:
+                context.close()
+            except:
+                pass
             browser.close()
 
 # ----- Fixed Playwright Automation Based on Actual Form Structure -----
@@ -194,6 +229,81 @@ def submit_to_ghl_form(name, phone, email, about_case):
             
             print(f"Successfully filled {success_count} fields")
             
+            # Check for CAPTCHA and all form elements before submitting
+            try:
+                detailed_form_check = frame.evaluate("""
+                    () => {
+                        const bodyText = document.body.textContent;
+                        const allElements = Array.from(document.querySelectorAll('*'));
+                        
+                        // Look for CAPTCHA elements
+                        const captchaElements = allElements.filter(el => 
+                            el.className.toLowerCase().includes('captcha') ||
+                            el.className.toLowerCase().includes('recaptcha') ||
+                            el.id.toLowerCase().includes('captcha') ||
+                            el.id.toLowerCase().includes('recaptcha') ||
+                            (el.tagName === 'IFRAME' && el.src && el.src.includes('recaptcha'))
+                        );
+                        
+                        // Check for hidden/invisible elements
+                        const hiddenCaptcha = allElements.filter(el => {
+                            const style = window.getComputedStyle(el);
+                            return (el.className.toLowerCase().includes('captcha') || 
+                                   el.className.toLowerCase().includes('recaptcha')) && 
+                                   (style.display === 'none' || style.visibility === 'hidden' || 
+                                    style.opacity === '0' || el.offsetWidth === 0);
+                        });
+                        
+                        // Get submit button state
+                        const submitButton = document.querySelector('button[type="submit"]');
+                        
+                        return {
+                            bodyTextContainsCaptcha: bodyText.toLowerCase().includes('captcha'),
+                            bodyTextContainsRecaptcha: bodyText.toLowerCase().includes('recaptcha'),
+                            bodyTextSample: bodyText.substring(bodyText.toLowerCase().indexOf('captcha') - 50, bodyText.toLowerCase().indexOf('captcha') + 100),
+                            captchaElementsFound: captchaElements.length,
+                            captchaElementsDetails: captchaElements.map(el => ({
+                                tagName: el.tagName,
+                                className: el.className,
+                                id: el.id,
+                                src: el.src || 'N/A',
+                                style: el.style.cssText || 'N/A',
+                                visible: el.offsetWidth > 0 && el.offsetHeight > 0
+                            })),
+                            hiddenCaptchaElements: hiddenCaptcha.length,
+                            submitButtonDisabled: submitButton ? submitButton.disabled : null,
+                            submitButtonText: submitButton ? submitButton.textContent.trim() : null,
+                            entireBodyText: bodyText
+                        };
+                    }
+                """)
+                
+                print(f"=== DETAILED CAPTCHA ANALYSIS ===")
+                print(f"Body text contains 'captcha': {detailed_form_check.get('bodyTextContainsCaptcha')}")
+                print(f"Body text contains 'recaptcha': {detailed_form_check.get('bodyTextContainsRecaptcha')}")
+                print(f"CAPTCHA elements found: {detailed_form_check.get('captchaElementsFound')}")
+                print(f"Hidden CAPTCHA elements: {detailed_form_check.get('hiddenCaptchaElements')}")
+                print(f"Submit button disabled: {detailed_form_check.get('submitButtonDisabled')}")
+                print(f"Submit button text: {detailed_form_check.get('submitButtonText')}")
+                
+                if detailed_form_check.get('bodyTextSample'):
+                    print(f"CAPTCHA context: '{detailed_form_check.get('bodyTextSample')}'")
+                
+                if detailed_form_check.get('captchaElementsDetails'):
+                    print("CAPTCHA elements details:")
+                    for i, element in enumerate(detailed_form_check.get('captchaElementsDetails', [])):
+                        print(f"  {i+1}. {element}")
+                
+                # Save the entire body text for analysis
+                print(f"=== FULL BODY TEXT (first 1000 chars) ===")
+                print(detailed_form_check.get('entireBodyText', '')[:1000])
+                print("=== END BODY TEXT ===")
+                
+            except Exception as e:
+                print(f"Error in detailed form check: {e}")
+                import traceback
+                traceback.print_exc()
+            
             # Take a screenshot before submitting (for debugging)
             try:
                 page.screenshot(path="/tmp/before_submit.png")
@@ -286,7 +396,11 @@ def submit_to_ghl_form(name, phone, email, about_case):
                 print(f"Body text sample: {success_check.get('bodyTextSample', '')[:300]}...")
                 
                 # More strict success criteria
-                if success_check.get('hasThankYou') or success_check.get('hasSuccess'):
+                if success_check.get('bodyText', '').includes('captcha') or success_check.get('bodyText', '').includes('recaptcha'):
+                    print("✗ FAILURE: CAPTCHA is blocking submission")
+                    print("Found CAPTCHA requirement in page text")
+                    return False
+                elif success_check.get('hasThankYou') or success_check.get('hasSuccess'):
                     print("✓ SUCCESS: Found success indicators in page text")
                     return True
                 elif not success_check.get('formFieldsStillVisible'):
@@ -298,7 +412,7 @@ def submit_to_ghl_form(name, phone, email, about_case):
                 elif success_count >= 2:
                     print("⚠ UNCERTAIN: Fields filled and submitted, but no clear success indicators")
                     print("This might be successful, but we can't confirm from the page response")
-                    return True
+                    return False  # Changed to False since CAPTCHA is likely blocking
                 else:
                     print("✗ FAILURE: Not enough fields filled")
                     return False
