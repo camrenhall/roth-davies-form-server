@@ -194,48 +194,119 @@ def submit_to_ghl_form(name, phone, email, about_case):
             
             print(f"Successfully filled {success_count} fields")
             
-            # Submit the form
+            # Take a screenshot before submitting (for debugging)
             try:
+                page.screenshot(path="/tmp/before_submit.png")
+                print("Screenshot taken before submit")
+            except:
+                pass
+            
+            # Submit the form with more detailed monitoring
+            try:
+                print("Attempting to click submit button...")
+                
+                # Wait a moment to ensure form is ready
+                page.wait_for_timeout(1000)
+                
+                # Try to click submit and monitor the response
                 frame.click('button[type="submit"]', timeout=5000)
-                print("✓ Clicked submit button")
+                print("✓ Submit button clicked")
+                
+                # Monitor for immediate changes
+                page.wait_for_timeout(2000)
+                
+                # Check if form disappeared or changed
+                form_check = frame.evaluate("""
+                    () => {
+                        const submitButton = document.querySelector('button[type="submit"]');
+                        const fullNameField = document.querySelector('input[name="full_name"]');
+                        return {
+                            submitButtonExists: submitButton !== null,
+                            submitButtonDisabled: submitButton ? submitButton.disabled : null,
+                            submitButtonText: submitButton ? submitButton.textContent.trim() : null,
+                            fullNameFieldExists: fullNameField !== null,
+                            fullNameFieldValue: fullNameField ? fullNameField.value : null
+                        };
+                    }
+                """)
+                print(f"Form state after submit click: {form_check}")
+                
+                # Wait longer for potential processing
+                print("Waiting for form processing...")
+                page.wait_for_timeout(8000)
+                
+                # Take screenshot after submitting
+                try:
+                    page.screenshot(path="/tmp/after_submit.png")
+                    print("Screenshot taken after submit")
+                except:
+                    pass
+                
             except Exception as e:
                 print(f"✗ Failed to click submit button: {e}")
                 return False
             
-            # Wait for submission to complete and check for success
-            page.wait_for_timeout(5000)
-            
-            # Check for success indicators or form changes
+            # Comprehensive success detection
             try:
+                print("Checking for submission success indicators...")
+                
                 success_check = frame.evaluate("""
                     () => {
                         const bodyText = document.body.textContent.toLowerCase();
-                        const formStillVisible = document.querySelector('input[name="first_name"]') !== null;
+                        const fullBodyText = document.body.textContent;
+                        const submitButton = document.querySelector('button[type="submit"]');
+                        const fullNameField = document.querySelector('input[name="full_name"]');
+                        
                         return {
-                            bodyText: bodyText.substring(0, 500),
-                            formStillVisible: formStillVisible,
+                            bodyTextSample: bodyText.substring(0, 800),
+                            fullBodyTextLength: fullBodyText.length,
+                            formFieldsStillVisible: fullNameField !== null,
+                            submitButtonExists: submitButton !== null,
+                            submitButtonText: submitButton ? submitButton.textContent.trim() : null,
+                            submitButtonDisabled: submitButton ? submitButton.disabled : null,
                             hasThankYou: bodyText.includes('thank you') || bodyText.includes('thanks'),
-                            hasSuccess: bodyText.includes('success') || bodyText.includes('submitted'),
-                            hasReceived: bodyText.includes('received') || bodyText.includes('sent'),
-                            currentUrl: window.location.href
+                            hasSuccess: bodyText.includes('success') || bodyText.includes('submitted') || bodyText.includes('received'),
+                            hasError: bodyText.includes('error') || bodyText.includes('failed') || bodyText.includes('invalid'),
+                            currentUrl: window.location.href,
+                            documentTitle: document.title
                         };
                     }
                 """)
                 
-                print(f"Success check results: {success_check}")
+                print(f"=== DETAILED SUCCESS CHECK ===")
+                print(f"Form fields still visible: {success_check.get('formFieldsStillVisible')}")
+                print(f"Submit button exists: {success_check.get('submitButtonExists')}")
+                print(f"Submit button text: {success_check.get('submitButtonText')}")
+                print(f"Submit button disabled: {success_check.get('submitButtonDisabled')}")
+                print(f"Has thank you message: {success_check.get('hasThankYou')}")
+                print(f"Has success indicators: {success_check.get('hasSuccess')}")
+                print(f"Has error indicators: {success_check.get('hasError')}")
+                print(f"Current URL: {success_check.get('currentUrl')}")
+                print(f"Document title: {success_check.get('documentTitle')}")
+                print(f"Body text sample: {success_check.get('bodyTextSample', '')[:300]}...")
                 
-                # Consider it successful if we filled required fields and clicked submit
-                # Additional success indicators are a bonus
-                if success_count >= 2:  # Name and email are minimum
-                    print("✓ Form submission appears successful")
+                # More strict success criteria
+                if success_check.get('hasThankYou') or success_check.get('hasSuccess'):
+                    print("✓ SUCCESS: Found success indicators in page text")
+                    return True
+                elif not success_check.get('formFieldsStillVisible'):
+                    print("✓ SUCCESS: Form fields disappeared (likely successful)")
+                    return True
+                elif success_check.get('hasError'):
+                    print("✗ FAILURE: Error indicators found")
+                    return False
+                elif success_count >= 2:
+                    print("⚠ UNCERTAIN: Fields filled and submitted, but no clear success indicators")
+                    print("This might be successful, but we can't confirm from the page response")
                     return True
                 else:
-                    print("✗ Not enough fields were filled")
+                    print("✗ FAILURE: Not enough fields filled")
                     return False
                     
             except Exception as e:
-                print(f"Could not check success indicators: {e}")
-                # If we got this far and filled the minimum fields, consider it successful
+                print(f"Error during success check: {e}")
+                import traceback
+                traceback.print_exc()
                 return success_count >= 2
             
         except Exception as e:
