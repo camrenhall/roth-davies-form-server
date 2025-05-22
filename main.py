@@ -13,7 +13,7 @@ app = FastAPI()
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
 # Webhook URL
-ZAPIER_WEBHOOK_URL = "https://hooks.zapier.com/hooks/catch/22987863/2j3r1l5/"
+MAKE_WEBHOOK_URL = "https://hook.us2.make.com/ws7b3t1c2p6xnp7s0gd9zr2yr7rlitam"
 
 def get_spam_detection_prompt(name: str, phone: str, email: str, about_case: str) -> str:
     """
@@ -128,9 +128,9 @@ async def send_to_webhook(name: str, phone: str, email: str, about_case: str) ->
         
         print(f"Sending to webhook: {form_data}")
         
-        # Send POST request to Zapier webhook
+        # Send POST request to make.com webhook
         response = requests.post(
-            ZAPIER_WEBHOOK_URL,
+            MAKE_WEBHOOK_URL,
             data=form_data,
             timeout=30
         )
