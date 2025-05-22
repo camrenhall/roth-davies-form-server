@@ -127,9 +127,8 @@ def submit_to_ghl_form(name, phone, email, about_case):
             try:
                 # Try to find any common form fields
                 selectors_to_try = [
-                    'input[name="first_name"]',
+                    'input[name="full_name"]',  # Updated field name
                     'input[name="name"]', 
-                    'input[name="full_name"]',
                     'input[type="text"]',
                     'input[type="email"]'
                 ]
@@ -156,9 +155,9 @@ def submit_to_ghl_form(name, phone, email, about_case):
             
             success_count = 0
             
-            # Fill the name field (first_name field with "Name" placeholder)
+            # Fill the name field (now properly named "full_name")
             try:
-                frame.fill('input[name="first_name"]', name, timeout=5000)
+                frame.fill('input[name="full_name"]', name, timeout=5000)
                 print(f"✓ Filled name field: {name}")
                 success_count += 1
             except Exception as e:
@@ -174,19 +173,19 @@ def submit_to_ghl_form(name, phone, email, about_case):
                 print(f"✗ Failed to fill email field: {e}")
                 return False  # Email is required
             
-            # Fill the phone field (last_name field with "Phone (Optional)" placeholder)
+            # Fill the phone field (now properly named "phone")
             if phone:
                 try:
-                    frame.fill('input[name="last_name"]', phone, timeout=5000)
+                    frame.fill('input[name="phone"]', phone, timeout=5000)
                     print(f"✓ Filled phone field: {phone}")
                     success_count += 1
                 except Exception as e:
                     print(f"⚠ Failed to fill phone field: {e}")
                     # Phone is optional, so continue
             
-            # Fill the case description (textarea with weird name)
+            # Fill the case description (textarea with new ID)
             try:
-                frame.fill('textarea[name="yC389AjWtdl4nv9GkvZM"]', about_case, timeout=5000)
+                frame.fill('textarea[name="YzYpYdqxuttqzK5GsJDW"]', about_case, timeout=5000)
                 print(f"✓ Filled case description field")
                 success_count += 1
             except Exception as e:
