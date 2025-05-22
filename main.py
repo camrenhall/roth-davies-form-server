@@ -74,14 +74,14 @@ Your response (one word only):"""
 
 async def check_for_spam(name: str, phone: str, email: str, about_case: str) -> bool:
     """
-    Use GPT-4o-mini to determine if the submission is spam.
+    Use GPT-4.1-nano to determine if the submission is spam.
     Returns True if spam, False if legitimate.
     """
     try:
         prompt = get_spam_detection_prompt(name, phone, email, about_case)
         
         response = openai.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4.1-nano",
             messages=[
                 {
                     "role": "system", 
