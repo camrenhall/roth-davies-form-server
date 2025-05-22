@@ -3,6 +3,7 @@ from typing import Optional
 from playwright.sync_api import sync_playwright
 import uvicorn
 import json
+from spam_handler import spam_handler
 
 app = FastAPI()
 
@@ -14,6 +15,9 @@ def submit_lead(
     email: str = Form(...),
     about_case: str = Form(...)
 ):
+    # Validate submission for spam
+    spam_handler.validate_submission(name, phone, email, about_case)
+    
     # Use the full name as provided - don't split it
     result = submit_to_ghl_form(name, phone, email, about_case)
     return {"status": "submitted", "success": result}
