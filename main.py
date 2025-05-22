@@ -1,429 +1,240 @@
-from fastapi import FastAPI, Form
+from fastapi import FastAPI, Form, HTTPException
 from typing import Optional
-from playwright.sync_api import sync_playwright
 import uvicorn
+import requests
+import json
+import openai
+import os
+from datetime import datetime
 
 app = FastAPI()
 
-# ----- FastAPI Route -----
+# Configure OpenAI client
+openai.api_key = os.getenv("OPENAI_API_KEY")
+
+# Webhook URL
+ZAPIER_WEBHOOK_URL = "https://hooks.zapier.com/hooks/catch/22987863/2j3r1l5/"
+
+def get_spam_detection_prompt(name: str, phone: str, email: str, about_case: str) -> str:
+    """
+    Comprehensive prompt for spam detection tailored to a law firm context.
+    """
+    return f"""You are an expert spam detection system for a law firm specializing in personal injury, criminal law, and divorce law. Your job is to analyze incoming form submissions and determine if they are legitimate potential client inquiries or spam.
+
+FIRM CONTEXT:
+- Personal injury law (car accidents, slip and fall, medical malpractice, workplace injuries)
+- Criminal law (DUI, drug charges, assault, theft, domestic violence, traffic violations)
+- Divorce law (divorce proceedings, custody disputes, alimony, property division)
+
+ANALYZE THIS SUBMISSION:
+Name: "{name}"
+Phone: "{phone}" 
+Email: "{email}"
+Case Description: "{about_case}"
+
+SPAM INDICATORS TO CHECK FOR:
+1. **Irrelevant Services**: Mentions of SEO, marketing, web design, crypto, investments, business loans, insurance sales, etc.
+2. **Generic Templates**: Obviously copy-pasted text, excessive keywords, unnatural language patterns
+3. **Fake Personal Info**: Obviously fake names (like "Test User", nonsensical names), invalid phone formats, suspicious email patterns
+4. **Promotional Content**: Trying to sell products/services, offering business opportunities, affiliate marketing
+5. **Technical Spam**: URLs, suspicious links, HTML tags, excessive special characters
+6. **Off-topic Inquiries**: Requests completely unrelated to legal services (tech support, medical advice, etc.)
+7. **Automated Messages**: Clearly bot-generated content, repetitive phrases, unnatural sentence structure
+8. **Gibberish**: Random characters, nonsensical text, foreign spam content
+
+LEGITIMATE INDICATORS:
+1. **Relevant Legal Issues**: Mentions accidents, injuries, arrests, charges, divorce, custody, legal problems
+2. **Personal Details**: Specific circumstances, dates, locations, genuine concern/urgency
+3. **Natural Language**: Human-like writing style, emotional context, personal pronouns
+4. **Valid Contact Info**: Realistic names, properly formatted phone numbers, legitimate email addresses
+5. **Specific Requests**: Asking for consultation, legal advice, representation, case evaluation
+
+DECISION CRITERIA:
+- If submission contains ANY clear spam indicators and NO legitimate legal context → SPAM
+- If submission is about legitimate legal matters with reasonable contact info → NOT SPAM
+- If submission is borderline but shows genuine legal need → NOT SPAM (err on side of caution)
+- If submission is clearly trying to sell something or is completely off-topic → SPAM
+
+IMPORTANT NOTES:
+- Be conservative - it's better to let through a borderline case than reject a real client
+- Test submissions with names like "Test", "Camren", etc. are legitimate for testing purposes
+- Focus on the case description content more than contact info formatting
+- Consider that real people may have typos, brief descriptions, or unusual circumstances
+
+Respond with ONLY one word: "SPAM" or "LEGITIMATE"
+
+Examples:
+- "I was in a car accident last week and need help" → LEGITIMATE
+- "We offer SEO services to grow your law firm" → SPAM  
+- "My husband filed for divorce, need attorney" → LEGITIMATE
+- "Make money from home with crypto trading" → SPAM
+- "Got arrested for DUI last night" → LEGITIMATE
+- "Test case description" → LEGITIMATE (testing purposes)
+- Random gibberish or foreign spam → SPAM
+
+Your response (one word only):"""
+
+async def check_for_spam(name: str, phone: str, email: str, about_case: str) -> bool:
+    """
+    Use GPT-4o-mini to determine if the submission is spam.
+    Returns True if spam, False if legitimate.
+    """
+    try:
+        prompt = get_spam_detection_prompt(name, phone, email, about_case)
+        
+        response = openai.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system", 
+                    "content": "You are a spam detection expert for a law firm. Respond with only 'SPAM' or 'LEGITIMATE'."
+                },
+                {
+                    "role": "user", 
+                    "content": prompt
+                }
+            ],
+            max_tokens=10,
+            temperature=0.1  # Low temperature for consistent results
+        )
+        
+        result = response.choices[0].message.content.strip().upper()
+        print(f"Spam detection result: {result}")
+        
+        # Log the analysis for monitoring
+        print(f"Analyzed submission - Name: {name}, Email: {email}, Result: {result}")
+        
+        return result == "SPAM"
+        
+    except Exception as e:
+        print(f"Error in spam detection: {e}")
+        # If OpenAI fails, err on the side of caution and allow the submission
+        print("Spam detection failed, allowing submission through")
+        return False
+
+async def send_to_webhook(name: str, phone: str, email: str, about_case: str) -> bool:
+    """
+    Send the legitimate submission to the Zapier webhook.
+    Returns True if successful, False if failed.
+    """
+    try:
+        # Prepare the form data
+        form_data = {
+            'name': name,
+            'phone': phone,
+            'email': email,
+            'about_case': about_case
+        }
+        
+        print(f"Sending to webhook: {form_data}")
+        
+        # Send POST request to Zapier webhook
+        response = requests.post(
+            ZAPIER_WEBHOOK_URL,
+            data=form_data,
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            print("Successfully sent to webhook")
+            return True
+        else:
+            print(f"Webhook failed with status code: {response.status_code}")
+            print(f"Response: {response.text}")
+            return False
+            
+    except Exception as e:
+        print(f"Error sending to webhook: {e}")
+        return False
+
+# ----- Main API Endpoint -----
 @app.post("/submit-lead")
-def submit_lead(
+async def submit_lead(
     name: str = Form(...),
     phone: Optional[str] = Form(None),
     email: str = Form(...),
     about_case: str = Form(...)
 ):
-    result = submit_to_ghl_form(name, phone, email, about_case)
-    return {"status": "submitted", "success": result}
+    """
+    Main endpoint that filters spam and forwards legitimate submissions to webhook.
+    """
+    try:
+        print(f"Received submission from {name} ({email})")
+        
+        # Basic validation
+        if not name or not email or not about_case:
+            raise HTTPException(status_code=400, detail="Missing required fields: name, email, and about_case are required")
+        
+        # Check for spam using GPT-4o-mini
+        is_spam = await check_for_spam(name, phone or "", email, about_case)
+        
+        if is_spam:
+            print(f"Submission from {name} ({email}) detected as SPAM - rejected")
+            return {
+                "status": "rejected",
+                "reason": "Submission detected as spam",
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        # Send legitimate submission to webhook
+        webhook_success = await send_to_webhook(name, phone or "", email, about_case)
+        
+        if webhook_success:
+            print(f"Submission from {name} ({email}) successfully processed and forwarded")
+            return {
+                "status": "success",
+                "message": "Lead submitted successfully",
+                "timestamp": datetime.now().isoformat()
+            }
+        else:
+            print(f"Failed to forward submission from {name} ({email}) to webhook")
+            raise HTTPException(status_code=500, detail="Failed to process submission")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Unexpected error processing submission: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
-# ----- Debug Route to Inspect Form -----
-@app.get("/debug-form")
-def debug_form():
-    result = inspect_form_structure()
-    return {"form_structure": result}
+# ----- Health Check Endpoint -----
+@app.get("/health")
+async def health_check():
+    """Simple health check endpoint."""
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "service": "Law Firm Spam Filter API"
+    }
 
-def inspect_form_structure():
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                '--no-sandbox',
-                '--disable-blink-features=AutomationControlled',
-                '--disable-dev-shm-usage',
-                '--disable-web-security',
-                '--disable-features=VizDisplayCompositor'
-            ]
-        )
+# ----- Test Endpoint for Spam Detection -----
+@app.post("/test-spam-detection")
+async def test_spam_detection(
+    name: str = Form(...),
+    phone: Optional[str] = Form(None),
+    email: str = Form(...),
+    about_case: str = Form(...)
+):
+    """
+    Test endpoint to check spam detection without sending to webhook.
+    """
+    try:
+        is_spam = await check_for_spam(name, phone or "", email, about_case)
         
-        # Create a more human-like browser context
-        context = browser.new_context(
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            viewport={'width': 1366, 'height': 768}
-        )
+        return {
+            "name": name,
+            "email": email,
+            "is_spam": is_spam,
+            "result": "SPAM" if is_spam else "LEGITIMATE",
+            "timestamp": datetime.now().isoformat()
+        }
         
-        page = context.new_page()
-        
-        # Remove webdriver traces
-        page.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', {
-                get: () => undefined,
-            });
-            
-            window.chrome = {
-                runtime: {},
-            };
-            
-            Object.defineProperty(navigator, 'plugins', {
-                get: () => [1, 2, 3, 4, 5],
-            });
-        """)
-        
-        try:
-            print("Loading page...")
-            page.goto("https://camrenhall.github.io/roth-davies-form-public/")
-            
-            # Wait for the main iframe to load (updated form ID again)
-            page.wait_for_selector('iframe#inline-YQRZjsrjVEFdk2pArn6b', timeout=15000)
-            print("Main iframe found")
-            
-            # Wait longer for iframe content to load
-            page.wait_for_timeout(8000)
-            
-            # Find the form frame
-            frame = None
-            for f in page.frames:
-                try:
-                    if f.url and ("leadconnectorhq.com" in f.url or "YQRZjsrjVEFdk2pArn6b" in f.url):
-                        print(f"Found frame with URL: {f.url}")
-                        frame = f
-                        break
-                except Exception as e:
-                    print(f"Error checking frame: {e}")
-            
-            if not frame:
-                return {"error": "Could not find form frame"}
-            
-            # Wait for form elements to load
-            page.wait_for_timeout(5000)
-            
-            # Get comprehensive form structure
-            form_structure = frame.evaluate("""
-                () => {
-                    const formElements = Array.from(document.querySelectorAll('input, textarea, select, button'));
-                    
-                    const structure = {
-                        formElements: formElements.map(el => ({
-                            tagName: el.tagName,
-                            type: el.type || 'N/A',
-                            name: el.name || 'N/A',
-                            id: el.id || 'N/A',
-                            placeholder: el.placeholder || 'N/A',
-                            className: el.className || 'N/A',
-                            value: el.value || 'N/A',
-                            required: el.required || false,
-                            textContent: (el.textContent || '').trim().substring(0, 100),
-                            outerHTML: el.outerHTML.substring(0, 300) + (el.outerHTML.length > 300 ? '...' : '')
-                        })),
-                        frameUrl: window.location.href
-                    };
-                    
-                    return structure;
-                }
-            """)
-            
-            return form_structure
-            
-        except Exception as e:
-            print(f"Error inspecting form: {e}")
-            return {"error": str(e)}
-        finally:
-            try:
-                context.close()
-            except:
-                pass
-            browser.close()
-
-# ----- Fixed Playwright Automation Based on Actual Form Structure -----
-def submit_to_ghl_form(name, phone, email, about_case):
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
-        
-        try:
-            print("Loading page for form submission...")
-            page.goto("https://camrenhall.github.io/roth-davies-form-public/")
-            
-            # Wait for the main iframe to load (updated form ID again)
-            page.wait_for_selector('iframe#inline-YQRZjsrjVEFdk2pArn6b', timeout=15000)
-            print("Main iframe loaded")
-            
-            # Wait for iframe content to fully load
-            page.wait_for_timeout(8000)
-            
-            # Find the form frame
-            frame = None
-            for f in page.frames:
-                try:
-                    if f.url and ("leadconnectorhq.com" in f.url or "YQRZjsrjVEFdk2pArn6b" in f.url):
-                        print(f"Found form frame: {f.url}")
-                        frame = f
-                        break
-                except Exception:
-                    continue
-            
-            if not frame:
-                print("ERROR: Could not find form frame")
-                return False
-            
-            # Wait for form to be ready
-            page.wait_for_timeout(3000)
-            
-            # Verify form elements are present (try multiple possible field names)
-            try:
-                # Try to find any common form fields
-                selectors_to_try = [
-                    'input[name="full_name"]',  # Updated field name
-                    'input[name="name"]', 
-                    'input[type="text"]',
-                    'input[type="email"]'
-                ]
-                
-                form_ready = False
-                for selector in selectors_to_try:
-                    try:
-                        frame.wait_for_selector(selector, timeout=3000)
-                        print(f"Found form element: {selector}")
-                        form_ready = True
-                        break
-                    except:
-                        continue
-                
-                if not form_ready:
-                    print("No recognizable form elements found")
-                    return False
-                else:
-                    print("Form elements are ready")
-                    
-            except Exception as e:
-                print(f"Form elements not ready: {e}")
-                return False
-            
-            success_count = 0
-            
-            # Fill the name field (now properly named "full_name")
-            try:
-                frame.fill('input[name="full_name"]', name, timeout=5000)
-                print(f"✓ Filled name field: {name}")
-                success_count += 1
-            except Exception as e:
-                print(f"✗ Failed to fill name field: {e}")
-                return False  # Name is required
-            
-            # Fill the email field
-            try:
-                frame.fill('input[name="email"]', email, timeout=5000)
-                print(f"✓ Filled email field: {email}")
-                success_count += 1
-            except Exception as e:
-                print(f"✗ Failed to fill email field: {e}")
-                return False  # Email is required
-            
-            # Fill the phone field (now properly named "phone")
-            if phone:
-                try:
-                    frame.fill('input[name="phone"]', phone, timeout=5000)
-                    print(f"✓ Filled phone field: {phone}")
-                    success_count += 1
-                except Exception as e:
-                    print(f"⚠ Failed to fill phone field: {e}")
-                    # Phone is optional, so continue
-            
-            # Fill the case description (textarea with updated ID)
-            try:
-                frame.fill('textarea[name="YzYpYdqxuttqzK5GsJDW"]', about_case, timeout=5000)
-                print(f"✓ Filled case description field")
-                success_count += 1
-            except Exception as e:
-                print(f"⚠ Failed to fill case description field: {e}")
-                # This field is required, so try alternative selectors
-                try:
-                    frame.fill('textarea[data-q="brief_description_of_your_situation"]', about_case, timeout=5000)
-                    print(f"✓ Filled case description using data-q selector")
-                    success_count += 1
-                except Exception as e2:
-                    print(f"⚠ Alternative selector also failed: {e2}")
-                    # Try any textarea
-                    try:
-                        frame.fill('textarea', about_case, timeout=3000)
-                        print(f"✓ Filled case description using generic textarea selector")
-                        success_count += 1
-                    except Exception as e3:
-                        print(f"✗ All textarea selectors failed: {e3}")
-                        # This is required, so we need to fail
-                        return False
-            
-            print(f"Successfully filled {success_count} fields")
-            
-            # Check for CAPTCHA and all form elements before submitting
-            try:
-                detailed_form_check = frame.evaluate("""
-                    () => {
-                        const bodyText = document.body.textContent;
-                        const allElements = Array.from(document.querySelectorAll('*'));
-                        
-                        // Look for CAPTCHA elements - fix the className bug
-                        const captchaElements = allElements.filter(el => {
-                            const className = el.className || '';
-                            const id = el.id || '';
-                            const classNameStr = typeof className === 'string' ? className : className.toString();
-                            const idStr = typeof id === 'string' ? id : id.toString();
-                            
-                            return classNameStr.toLowerCase().includes('captcha') ||
-                                   classNameStr.toLowerCase().includes('recaptcha') ||
-                                   idStr.toLowerCase().includes('captcha') ||
-                                   idStr.toLowerCase().includes('recaptcha') ||
-                                   (el.tagName === 'IFRAME' && el.src && el.src.includes('recaptcha'));
-                        });
-                        
-                        // Get submit button state
-                        const submitButton = document.querySelector('button[type="submit"]');
-                        
-                        return {
-                            bodyTextContainsCaptcha: bodyText.toLowerCase().includes('captcha'),
-                            bodyTextContainsRecaptcha: bodyText.toLowerCase().includes('recaptcha'),
-                            captchaElementsFound: captchaElements.length,
-                            submitButtonDisabled: submitButton ? submitButton.disabled : null,
-                            submitButtonText: submitButton ? submitButton.textContent.trim() : null,
-                            captchaContextBefore: bodyText.toLowerCase().indexOf('captcha') >= 0 ? 
-                                bodyText.substring(Math.max(0, bodyText.toLowerCase().indexOf('captcha') - 50), bodyText.toLowerCase().indexOf('captcha') + 100) : 'No captcha found',
-                            entireBodyText: bodyText.substring(0, 2000)  // First 2000 chars
-                        };
-                    }
-                """)
-                
-                print(f"=== DETAILED CAPTCHA ANALYSIS ===")
-                print(f"Body text contains 'captcha': {detailed_form_check.get('bodyTextContainsCaptcha')}")
-                print(f"Body text contains 'recaptcha': {detailed_form_check.get('bodyTextContainsRecaptcha')}")
-                print(f"CAPTCHA elements found: {detailed_form_check.get('captchaElementsFound')}")
-                print(f"Submit button disabled: {detailed_form_check.get('submitButtonDisabled')}")
-                print(f"Submit button text: {detailed_form_check.get('submitButtonText')}")
-                print(f"CAPTCHA context: '{detailed_form_check.get('captchaContextBefore')}'")
-                
-                print(f"=== FULL BODY TEXT (first 2000 chars) ===")
-                print(detailed_form_check.get('entireBodyText', ''))
-                print("=== END BODY TEXT ===")
-                
-            except Exception as e:
-                print(f"Error in detailed form check: {e}")
-                import traceback
-                traceback.print_exc()
-            
-            # Take a screenshot before submitting (for debugging)
-            try:
-                page.screenshot(path="/tmp/before_submit.png")
-                print("Screenshot taken before submit")
-            except:
-                pass
-            
-            # Submit the form with more detailed monitoring
-            try:
-                print("Attempting to click submit button...")
-                
-                # Wait a moment to ensure form is ready
-                page.wait_for_timeout(1000)
-                
-                # Try to click submit and monitor the response
-                frame.click('button[type="submit"]', timeout=5000)
-                print("✓ Submit button clicked")
-                
-                # Monitor for immediate changes
-                page.wait_for_timeout(2000)
-                
-                # Check if form disappeared or changed
-                form_check = frame.evaluate("""
-                    () => {
-                        const submitButton = document.querySelector('button[type="submit"]');
-                        const fullNameField = document.querySelector('input[name="full_name"]');
-                        return {
-                            submitButtonExists: submitButton !== null,
-                            submitButtonDisabled: submitButton ? submitButton.disabled : null,
-                            submitButtonText: submitButton ? submitButton.textContent.trim() : null,
-                            fullNameFieldExists: fullNameField !== null,
-                            fullNameFieldValue: fullNameField ? fullNameField.value : null
-                        };
-                    }
-                """)
-                print(f"Form state after submit click: {form_check}")
-                
-                # Wait longer for potential processing
-                print("Waiting for form processing...")
-                page.wait_for_timeout(8000)
-                
-                # Take screenshot after submitting
-                try:
-                    page.screenshot(path="/tmp/after_submit.png")
-                    print("Screenshot taken after submit")
-                except:
-                    pass
-                
-            except Exception as e:
-                print(f"✗ Failed to click submit button: {e}")
-                return False
-            
-            # Comprehensive success detection
-            try:
-                print("Checking for submission success indicators...")
-                
-                success_check = frame.evaluate("""
-                    () => {
-                        const bodyText = document.body.textContent.toLowerCase();
-                        const fullBodyText = document.body.textContent;
-                        const submitButton = document.querySelector('button[type="submit"]');
-                        const fullNameField = document.querySelector('input[name="full_name"]');
-                        
-                        return {
-                            bodyTextSample: bodyText.substring(0, 800),
-                            fullBodyTextLength: fullBodyText.length,
-                            formFieldsStillVisible: fullNameField !== null,
-                            submitButtonExists: submitButton !== null,
-                            submitButtonText: submitButton ? submitButton.textContent.trim() : null,
-                            submitButtonDisabled: submitButton ? submitButton.disabled : null,
-                            hasThankYou: bodyText.includes('thank you') || bodyText.includes('thanks'),
-                            hasSuccess: bodyText.includes('success') || bodyText.includes('submitted') || bodyText.includes('received'),
-                            hasError: bodyText.includes('error') || bodyText.includes('failed') || bodyText.includes('invalid'),
-                            currentUrl: window.location.href,
-                            documentTitle: document.title
-                        };
-                    }
-                """)
-                
-                print(f"=== DETAILED SUCCESS CHECK ===")
-                print(f"Form fields still visible: {success_check.get('formFieldsStillVisible')}")
-                print(f"Submit button exists: {success_check.get('submitButtonExists')}")
-                print(f"Submit button text: {success_check.get('submitButtonText')}")
-                print(f"Submit button disabled: {success_check.get('submitButtonDisabled')}")
-                print(f"Has thank you message: {success_check.get('hasThankYou')}")
-                print(f"Has success indicators: {success_check.get('hasSuccess')}")
-                print(f"Has error indicators: {success_check.get('hasError')}")
-                print(f"Current URL: {success_check.get('currentUrl')}")
-                print(f"Document title: {success_check.get('documentTitle')}")
-                print(f"Body text sample: {success_check.get('bodyTextSample', '')[:300]}...")
-                
-                # More strict success criteria - fix Python string method bug
-                if 'captcha' in success_check.get('bodyText', '').lower() or 'recaptcha' in success_check.get('bodyText', '').lower():
-                    print("✗ FAILURE: CAPTCHA is blocking submission")
-                    print("Found CAPTCHA requirement in page text")
-                    return False
-                elif success_check.get('hasThankYou') or success_check.get('hasSuccess'):
-                    print("✓ SUCCESS: Found success indicators in page text")
-                    return True
-                elif not success_check.get('formFieldsStillVisible'):
-                    print("✓ SUCCESS: Form fields disappeared (likely successful)")
-                    return True
-                elif success_check.get('hasError'):
-                    print("✗ FAILURE: Error indicators found")
-                    return False
-                elif success_count >= 2:
-                    print("⚠ UNCERTAIN: Fields filled and submitted, but no clear success indicators")
-                    print("This might be successful, but we can't confirm from the page response")
-                    return False  # Changed to False since CAPTCHA is likely blocking
-                else:
-                    print("✗ FAILURE: Not enough fields filled")
-                    return False
-                    
-            except Exception as e:
-                print(f"Error during success check: {e}")
-                import traceback
-                traceback.print_exc()
-                return success_count >= 2
-            
-        except Exception as e:
-            print(f"Error submitting form: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-        finally:
-            browser.close()
+    except Exception as e:
+        print(f"Error in spam detection test: {e}")
+        raise HTTPException(status_code=500, detail="Spam detection test failed")
 
 if __name__ == "__main__":
+    # Check for required environment variable
+    if not os.getenv("OPENAI_API_KEY"):
+        print("WARNING: OPENAI_API_KEY environment variable not set")
+    
     uvicorn.run(app, host="0.0.0.0", port=10000)
