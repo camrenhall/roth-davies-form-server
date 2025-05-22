@@ -2,7 +2,6 @@ from fastapi import FastAPI, Form
 from typing import Optional
 from playwright.sync_api import sync_playwright
 import uvicorn
-import json
 
 app = FastAPI()
 
@@ -14,7 +13,6 @@ def submit_lead(
     email: str = Form(...),
     about_case: str = Form(...)
 ):
-    # Use the full name as provided - don't split it
     result = submit_to_ghl_form(name, phone, email, about_case)
     return {"status": "submitted", "success": result}
 
@@ -33,8 +31,8 @@ def inspect_form_structure():
             print("Loading page...")
             page.goto("https://camrenhall.github.io/roth-davies-form-public/")
             
-            # Wait for the main iframe to load
-            page.wait_for_selector('iframe#inline-UQVFhuQiNCfdJTydbFrm', timeout=15000)
+            # Wait for the main iframe to load (updated form ID)
+            page.wait_for_selector('iframe#inline-RlGk6eSbjEVA2yMNDYvl', timeout=15000)
             print("Main iframe found")
             
             # Wait longer for iframe content to load
@@ -44,7 +42,7 @@ def inspect_form_structure():
             frame = None
             for f in page.frames:
                 try:
-                    if f.url and ("leadconnectorhq.com" in f.url or "UQVFhuQiNCfdJTydbFrm" in f.url):
+                    if f.url and ("leadconnectorhq.com" in f.url or "RlGk6eSbjEVA2yMNDYvl" in f.url):
                         print(f"Found frame with URL: {f.url}")
                         frame = f
                         break
@@ -52,28 +50,17 @@ def inspect_form_structure():
                     print(f"Error checking frame: {e}")
             
             if not frame:
-                print("No matching frame found. Available frames:")
-                for i, f in enumerate(page.frames):
-                    try:
-                        print(f"Frame {i}: {f.url}")
-                    except:
-                        print(f"Frame {i}: Unable to get URL")
                 return {"error": "Could not find form frame"}
             
-            # Wait for any form elements to load
+            # Wait for form elements to load
             page.wait_for_timeout(5000)
             
             # Get comprehensive form structure
             form_structure = frame.evaluate("""
                 () => {
-                    // Get all form elements
-                    const allElements = Array.from(document.querySelectorAll('*'));
-                    const formElements = allElements.filter(el => 
-                        ['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON', 'FORM'].includes(el.tagName)
-                    );
+                    const formElements = Array.from(document.querySelectorAll('input, textarea, select, button'));
                     
                     const structure = {
-                        totalElements: allElements.length,
                         formElements: formElements.map(el => ({
                             tagName: el.tagName,
                             type: el.type || 'N/A',
@@ -86,8 +73,6 @@ def inspect_form_structure():
                             textContent: (el.textContent || '').trim().substring(0, 100),
                             outerHTML: el.outerHTML.substring(0, 300) + (el.outerHTML.length > 300 ? '...' : '')
                         })),
-                        bodyHTML: document.body.innerHTML.substring(0, 1000) + '...',
-                        documentReady: document.readyState,
                         frameUrl: window.location.href
                     };
                     
@@ -95,36 +80,15 @@ def inspect_form_structure():
                 }
             """)
             
-            print("=== FORM STRUCTURE ANALYSIS ===")
-            print(f"Frame URL: {frame.url}")
-            print(f"Total elements in frame: {form_structure.get('totalElements', 0)}")
-            print(f"Form elements found: {len(form_structure.get('formElements', []))}")
-            print(f"Document ready state: {form_structure.get('documentReady', 'unknown')}")
-            
-            print("\n=== FORM ELEMENTS ===")
-            for i, element in enumerate(form_structure.get('formElements', [])):
-                print(f"\nElement {i+1}:")
-                print(f"  Tag: {element['tagName']}")
-                print(f"  Type: {element['type']}")
-                print(f"  Name: {element['name']}")
-                print(f"  ID: {element['id']}")
-                print(f"  Placeholder: {element['placeholder']}")
-                print(f"  Class: {element['className']}")
-                print(f"  Required: {element['required']}")
-                print(f"  Text: {element['textContent'][:50]}...")
-                print(f"  HTML: {element['outerHTML'][:150]}...")
-            
             return form_structure
             
         except Exception as e:
             print(f"Error inspecting form: {e}")
-            import traceback
-            traceback.print_exc()
             return {"error": str(e)}
         finally:
             browser.close()
 
-# ----- Updated Playwright Automation -----
+# ----- Fixed Playwright Automation Based on Actual Form Structure -----
 def submit_to_ghl_form(name, phone, email, about_case):
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -134,18 +98,18 @@ def submit_to_ghl_form(name, phone, email, about_case):
             print("Loading page for form submission...")
             page.goto("https://camrenhall.github.io/roth-davies-form-public/")
             
-            # Wait for the main iframe to load
-            page.wait_for_selector('iframe#inline-UQVFhuQiNCfdJTydbFrm', timeout=15000)
+            # Wait for the main iframe to load (updated form ID)
+            page.wait_for_selector('iframe#inline-RlGk6eSbjEVA2yMNDYvl', timeout=15000)
             print("Main iframe loaded")
             
-            # Wait longer for iframe content to fully load
+            # Wait for iframe content to fully load
             page.wait_for_timeout(8000)
             
             # Find the form frame
             frame = None
             for f in page.frames:
                 try:
-                    if f.url and ("leadconnectorhq.com" in f.url or "UQVFhuQiNCfdJTydbFrm" in f.url):
+                    if f.url and ("leadconnectorhq.com" in f.url or "RlGk6eSbjEVA2yMNDYvl" in f.url):
                         print(f"Found form frame: {f.url}")
                         frame = f
                         break
@@ -154,196 +118,126 @@ def submit_to_ghl_form(name, phone, email, about_case):
             
             if not frame:
                 print("ERROR: Could not find form frame")
-                # List all available frames for debugging
-                for i, f in enumerate(page.frames):
-                    try:
-                        print(f"Available frame {i}: {f.url}")
-                    except:
-                        print(f"Available frame {i}: Unable to get URL")
                 return False
             
             # Wait for form to be ready
             page.wait_for_timeout(3000)
             
-            # Get all available form elements
-            available_elements = frame.evaluate("""
-                () => {
-                    const elements = Array.from(document.querySelectorAll('input, textarea, select, button'));
-                    return elements.map(el => ({
-                        tagName: el.tagName,
-                        type: el.type || 'N/A',
-                        name: el.name || 'N/A',
-                        id: el.id || 'N/A',
-                        placeholder: el.placeholder || 'N/A',
-                        className: el.className || 'N/A'
-                    }));
-                }
-            """)
-            print(f"Available form elements: {json.dumps(available_elements, indent=2)}")
+            # Verify form elements are present (try multiple possible field names)
+            try:
+                # Try to find any common form fields
+                selectors_to_try = [
+                    'input[name="first_name"]',
+                    'input[name="name"]', 
+                    'input[name="full_name"]',
+                    'input[type="text"]',
+                    'input[type="email"]'
+                ]
+                
+                form_ready = False
+                for selector in selectors_to_try:
+                    try:
+                        frame.wait_for_selector(selector, timeout=3000)
+                        print(f"Found form element: {selector}")
+                        form_ready = True
+                        break
+                    except:
+                        continue
+                
+                if not form_ready:
+                    print("No recognizable form elements found")
+                    return False
+                else:
+                    print("Form elements are ready")
+                    
+            except Exception as e:
+                print(f"Form elements not ready: {e}")
+                return False
             
             success_count = 0
             
-            # Fill name field - try various selectors based on common patterns
-            name_selectors = [
-                'input[name="name"]',
-                'input[name="full_name"]',
-                'input[name="fullName"]',
-                'input[placeholder*="name" i]',
-                'input[placeholder*="Name" i]',
-                'input[type="text"]:first-of-type',
-                'input:first-of-type'
-            ]
+            # Fill the name field (first_name field with "Name" placeholder)
+            try:
+                frame.fill('input[name="first_name"]', name, timeout=5000)
+                print(f"✓ Filled name field: {name}")
+                success_count += 1
+            except Exception as e:
+                print(f"✗ Failed to fill name field: {e}")
+                return False  # Name is required
             
-            name_filled = False
-            for selector in name_selectors:
-                try:
-                    element = frame.query_selector(selector)
-                    if element:
-                        frame.fill(selector, name, timeout=5000)
-                        print(f"✓ Filled name using: {selector}")
-                        success_count += 1
-                        name_filled = True
-                        break
-                except Exception as e:
-                    print(f"Failed name selector {selector}: {e}")
+            # Fill the email field
+            try:
+                frame.fill('input[name="email"]', email, timeout=5000)
+                print(f"✓ Filled email field: {email}")
+                success_count += 1
+            except Exception as e:
+                print(f"✗ Failed to fill email field: {e}")
+                return False  # Email is required
             
-            if not name_filled:
-                print("⚠ Could not fill name field")
-            
-            # Fill email field
-            email_selectors = [
-                'input[name="email"]',
-                'input[type="email"]',
-                'input[placeholder*="email" i]',
-                'input[placeholder*="Email" i]'
-            ]
-            
-            email_filled = False
-            for selector in email_selectors:
-                try:
-                    element = frame.query_selector(selector)
-                    if element:
-                        frame.fill(selector, email, timeout=5000)
-                        print(f"✓ Filled email using: {selector}")
-                        success_count += 1
-                        email_filled = True
-                        break
-                except Exception as e:
-                    print(f"Failed email selector {selector}: {e}")
-            
-            if not email_filled:
-                print("⚠ Could not fill email field")
-            
-            # Fill phone field (optional)
+            # Fill the phone field (last_name field with "Phone (Optional)" placeholder)
             if phone:
-                phone_selectors = [
-                    'input[name="phone"]',
-                    'input[type="tel"]',
-                    'input[placeholder*="phone" i]',
-                    'input[placeholder*="Phone" i]',
-                    'input[placeholder*="number" i]'
-                ]
-                
-                phone_filled = False
-                for selector in phone_selectors:
-                    try:
-                        element = frame.query_selector(selector)
-                        if element:
-                            frame.fill(selector, phone, timeout=3000)
-                            print(f"✓ Filled phone using: {selector}")
-                            success_count += 1
-                            phone_filled = True
-                            break
-                    except Exception as e:
-                        print(f"Failed phone selector {selector}: {e}")
-                
-                if not phone_filled:
-                    print("⚠ Phone field not found or couldn't be filled")
-            
-            # Fill message/case description
-            message_selectors = [
-                'textarea[name*="case"]',
-                'textarea[name*="message"]',
-                'textarea[name*="about"]',
-                'textarea[name*="tell"]',
-                'textarea[placeholder*="case" i]',
-                'textarea[placeholder*="tell" i]',
-                'textarea[placeholder*="about" i]',
-                'textarea[placeholder*="message" i]',
-                'textarea',  # Fallback to any textarea
-                'input[name*="case"]',
-                'input[name*="message"]'
-            ]
-            
-            message_filled = False
-            for selector in message_selectors:
                 try:
-                    element = frame.query_selector(selector)
-                    if element:
-                        frame.fill(selector, about_case, timeout=5000)
-                        print(f"✓ Filled message using: {selector}")
-                        success_count += 1
-                        message_filled = True
-                        break
+                    frame.fill('input[name="last_name"]', phone, timeout=5000)
+                    print(f"✓ Filled phone field: {phone}")
+                    success_count += 1
                 except Exception as e:
-                    print(f"Failed message selector {selector}: {e}")
+                    print(f"⚠ Failed to fill phone field: {e}")
+                    # Phone is optional, so continue
             
-            if not message_filled:
-                print("⚠ Could not fill message field")
+            # Fill the case description (textarea with weird name)
+            try:
+                frame.fill('textarea[name="yC389AjWtdl4nv9GkvZM"]', about_case, timeout=5000)
+                print(f"✓ Filled case description field")
+                success_count += 1
+            except Exception as e:
+                print(f"⚠ Failed to fill case description field: {e}")
+                # Continue even if this fails
             
             print(f"Successfully filled {success_count} fields")
             
             # Submit the form
-            submit_selectors = [
-                'button[type="submit"]',
-                'input[type="submit"]',
-                'button:has-text("Submit")',
-                'button:has-text("submit")',
-                'button:has-text("Send")',
-                'button[class*="submit" i]',
-                'button'  # Fallback to any button
-            ]
-            
-            submitted = False
-            for selector in submit_selectors:
-                try:
-                    element = frame.query_selector(selector)
-                    if element:
-                        frame.click(selector, timeout=5000)
-                        print(f"✓ Clicked submit using: {selector}")
-                        submitted = True
-                        break
-                except Exception as e:
-                    print(f"Failed submit selector {selector}: {e}")
-            
-            if not submitted:
-                print("ERROR: Could not find or click submit button")
+            try:
+                frame.click('button[type="submit"]', timeout=5000)
+                print("✓ Clicked submit button")
+            except Exception as e:
+                print(f"✗ Failed to click submit button: {e}")
                 return False
             
-            # Wait for submission to complete
+            # Wait for submission to complete and check for success
             page.wait_for_timeout(5000)
-            print("Form submission attempted")
             
-            # Check for success indicators
+            # Check for success indicators or form changes
             try:
-                # Look for common success messages or redirects
-                success_indicators = frame.evaluate("""
+                success_check = frame.evaluate("""
                     () => {
-                        const text = document.body.textContent.toLowerCase();
+                        const bodyText = document.body.textContent.toLowerCase();
+                        const formStillVisible = document.querySelector('input[name="first_name"]') !== null;
                         return {
-                            hasThankYou: text.includes('thank you') || text.includes('thanks'),
-                            hasSuccess: text.includes('success') || text.includes('submitted'),
-                            hasReceived: text.includes('received') || text.includes('sent'),
-                            currentUrl: window.location.href,
-                            bodyText: document.body.textContent.substring(0, 500)
+                            bodyText: bodyText.substring(0, 500),
+                            formStillVisible: formStillVisible,
+                            hasThankYou: bodyText.includes('thank you') || bodyText.includes('thanks'),
+                            hasSuccess: bodyText.includes('success') || bodyText.includes('submitted'),
+                            hasReceived: bodyText.includes('received') || bodyText.includes('sent'),
+                            currentUrl: window.location.href
                         };
                     }
                 """)
-                print(f"Success indicators: {success_indicators}")
+                
+                print(f"Success check results: {success_check}")
+                
+                # Consider it successful if we filled required fields and clicked submit
+                # Additional success indicators are a bonus
+                if success_count >= 2:  # Name and email are minimum
+                    print("✓ Form submission appears successful")
+                    return True
+                else:
+                    print("✗ Not enough fields were filled")
+                    return False
+                    
             except Exception as e:
                 print(f"Could not check success indicators: {e}")
-            
-            return success_count >= 2  # Require at least name and email to be filled
+                # If we got this far and filled the minimum fields, consider it successful
+                return success_count >= 2
             
         except Exception as e:
             print(f"Error submitting form: {e}")
