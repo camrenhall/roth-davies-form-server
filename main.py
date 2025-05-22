@@ -6,6 +6,14 @@ def submit_to_ghl_form(first_name, last_name, phone, email, about_case):
         page.wait_for_selector('iframe#inline-UQVFhuQiNCfdJTydbFrm')
 
         # Grab the iframe again AFTER the page/iframe is stable
+        def submit_to_ghl_form(first_name, last_name, phone, email, about_case):
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.goto("https://camrenhall.github.io/roth-davies-form-public/")
+        page.wait_for_selector('iframe#inline-UQVFhuQiNCfdJTydbFrm')
+
+        # Grab the iframe again AFTER the page/iframe is stable
         def get_live_form_frame():
             # Wait for the form input to appear in ANY child frame
             for _ in range(30):  # retry up to 6 seconds
@@ -31,3 +39,4 @@ def submit_to_ghl_form(first_name, last_name, phone, email, about_case):
         page.wait_for_timeout(2000)
         browser.close()
         return True
+
