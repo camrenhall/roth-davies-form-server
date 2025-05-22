@@ -57,7 +57,6 @@ DECISION CRITERIA:
 
 IMPORTANT NOTES:
 - Be conservative - it's better to let through a borderline case than reject a real client
-- Test submissions with names like "Test", "Camren", etc. are legitimate for testing purposes
 - Focus on the case description content more than contact info formatting
 - Consider that real people may have typos, brief descriptions, or unusual circumstances
 
@@ -69,7 +68,6 @@ Examples:
 - "My husband filed for divorce, need attorney" → LEGITIMATE
 - "Make money from home with crypto trading" → SPAM
 - "Got arrested for DUI last night" → LEGITIMATE
-- "Test case description" → LEGITIMATE (testing purposes)
 - Random gibberish or foreign spam → SPAM
 
 Your response (one word only):"""
