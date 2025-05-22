@@ -62,8 +62,8 @@ def inspect_form_structure():
             print("Loading page...")
             page.goto("https://camrenhall.github.io/roth-davies-form-public/")
             
-            # Wait for the main iframe to load (updated form ID)
-            page.wait_for_selector('iframe#inline-RlGk6eSbjEVA2yMNDYvl', timeout=15000)
+            # Wait for the main iframe to load (updated form ID again)
+            page.wait_for_selector('iframe#inline-YQRZjsrjVEFdk2pArn6b', timeout=15000)
             print("Main iframe found")
             
             # Wait longer for iframe content to load
@@ -73,7 +73,7 @@ def inspect_form_structure():
             frame = None
             for f in page.frames:
                 try:
-                    if f.url and ("leadconnectorhq.com" in f.url or "RlGk6eSbjEVA2yMNDYvl" in f.url):
+                    if f.url and ("leadconnectorhq.com" in f.url or "YQRZjsrjVEFdk2pArn6b" in f.url):
                         print(f"Found frame with URL: {f.url}")
                         frame = f
                         break
@@ -133,8 +133,8 @@ def submit_to_ghl_form(name, phone, email, about_case):
             print("Loading page for form submission...")
             page.goto("https://camrenhall.github.io/roth-davies-form-public/")
             
-            # Wait for the main iframe to load (updated form ID)
-            page.wait_for_selector('iframe#inline-RlGk6eSbjEVA2yMNDYvl', timeout=15000)
+            # Wait for the main iframe to load (updated form ID again)
+            page.wait_for_selector('iframe#inline-YQRZjsrjVEFdk2pArn6b', timeout=15000)
             print("Main iframe loaded")
             
             # Wait for iframe content to fully load
@@ -144,7 +144,7 @@ def submit_to_ghl_form(name, phone, email, about_case):
             frame = None
             for f in page.frames:
                 try:
-                    if f.url and ("leadconnectorhq.com" in f.url or "RlGk6eSbjEVA2yMNDYvl" in f.url):
+                    if f.url and ("leadconnectorhq.com" in f.url or "YQRZjsrjVEFdk2pArn6b" in f.url):
                         print(f"Found form frame: {f.url}")
                         frame = f
                         break
@@ -236,22 +236,18 @@ def submit_to_ghl_form(name, phone, email, about_case):
                         const bodyText = document.body.textContent;
                         const allElements = Array.from(document.querySelectorAll('*'));
                         
-                        // Look for CAPTCHA elements
-                        const captchaElements = allElements.filter(el => 
-                            el.className.toLowerCase().includes('captcha') ||
-                            el.className.toLowerCase().includes('recaptcha') ||
-                            el.id.toLowerCase().includes('captcha') ||
-                            el.id.toLowerCase().includes('recaptcha') ||
-                            (el.tagName === 'IFRAME' && el.src && el.src.includes('recaptcha'))
-                        );
-                        
-                        // Check for hidden/invisible elements
-                        const hiddenCaptcha = allElements.filter(el => {
-                            const style = window.getComputedStyle(el);
-                            return (el.className.toLowerCase().includes('captcha') || 
-                                   el.className.toLowerCase().includes('recaptcha')) && 
-                                   (style.display === 'none' || style.visibility === 'hidden' || 
-                                    style.opacity === '0' || el.offsetWidth === 0);
+                        // Look for CAPTCHA elements - fix the className bug
+                        const captchaElements = allElements.filter(el => {
+                            const className = el.className || '';
+                            const id = el.id || '';
+                            const classNameStr = typeof className === 'string' ? className : className.toString();
+                            const idStr = typeof id === 'string' ? id : id.toString();
+                            
+                            return classNameStr.toLowerCase().includes('captcha') ||
+                                   classNameStr.toLowerCase().includes('recaptcha') ||
+                                   idStr.toLowerCase().includes('captcha') ||
+                                   idStr.toLowerCase().includes('recaptcha') ||
+                                   (el.tagName === 'IFRAME' && el.src && el.src.includes('recaptcha'));
                         });
                         
                         // Get submit button state
@@ -260,20 +256,12 @@ def submit_to_ghl_form(name, phone, email, about_case):
                         return {
                             bodyTextContainsCaptcha: bodyText.toLowerCase().includes('captcha'),
                             bodyTextContainsRecaptcha: bodyText.toLowerCase().includes('recaptcha'),
-                            bodyTextSample: bodyText.substring(bodyText.toLowerCase().indexOf('captcha') - 50, bodyText.toLowerCase().indexOf('captcha') + 100),
                             captchaElementsFound: captchaElements.length,
-                            captchaElementsDetails: captchaElements.map(el => ({
-                                tagName: el.tagName,
-                                className: el.className,
-                                id: el.id,
-                                src: el.src || 'N/A',
-                                style: el.style.cssText || 'N/A',
-                                visible: el.offsetWidth > 0 && el.offsetHeight > 0
-                            })),
-                            hiddenCaptchaElements: hiddenCaptcha.length,
                             submitButtonDisabled: submitButton ? submitButton.disabled : null,
                             submitButtonText: submitButton ? submitButton.textContent.trim() : null,
-                            entireBodyText: bodyText
+                            captchaContextBefore: bodyText.toLowerCase().indexOf('captcha') >= 0 ? 
+                                bodyText.substring(Math.max(0, bodyText.toLowerCase().indexOf('captcha') - 50), bodyText.toLowerCase().indexOf('captcha') + 100) : 'No captcha found',
+                            entireBodyText: bodyText.substring(0, 2000)  // First 2000 chars
                         };
                     }
                 """)
@@ -282,21 +270,12 @@ def submit_to_ghl_form(name, phone, email, about_case):
                 print(f"Body text contains 'captcha': {detailed_form_check.get('bodyTextContainsCaptcha')}")
                 print(f"Body text contains 'recaptcha': {detailed_form_check.get('bodyTextContainsRecaptcha')}")
                 print(f"CAPTCHA elements found: {detailed_form_check.get('captchaElementsFound')}")
-                print(f"Hidden CAPTCHA elements: {detailed_form_check.get('hiddenCaptchaElements')}")
                 print(f"Submit button disabled: {detailed_form_check.get('submitButtonDisabled')}")
                 print(f"Submit button text: {detailed_form_check.get('submitButtonText')}")
+                print(f"CAPTCHA context: '{detailed_form_check.get('captchaContextBefore')}'")
                 
-                if detailed_form_check.get('bodyTextSample'):
-                    print(f"CAPTCHA context: '{detailed_form_check.get('bodyTextSample')}'")
-                
-                if detailed_form_check.get('captchaElementsDetails'):
-                    print("CAPTCHA elements details:")
-                    for i, element in enumerate(detailed_form_check.get('captchaElementsDetails', [])):
-                        print(f"  {i+1}. {element}")
-                
-                # Save the entire body text for analysis
-                print(f"=== FULL BODY TEXT (first 1000 chars) ===")
-                print(detailed_form_check.get('entireBodyText', '')[:1000])
+                print(f"=== FULL BODY TEXT (first 2000 chars) ===")
+                print(detailed_form_check.get('entireBodyText', ''))
                 print("=== END BODY TEXT ===")
                 
             except Exception as e:
@@ -395,8 +374,8 @@ def submit_to_ghl_form(name, phone, email, about_case):
                 print(f"Document title: {success_check.get('documentTitle')}")
                 print(f"Body text sample: {success_check.get('bodyTextSample', '')[:300]}...")
                 
-                # More strict success criteria
-                if success_check.get('bodyText', '').includes('captcha') or success_check.get('bodyText', '').includes('recaptcha'):
+                # More strict success criteria - fix Python string method bug
+                if 'captcha' in success_check.get('bodyText', '').lower() or 'recaptcha' in success_check.get('bodyText', '').lower():
                     print("✗ FAILURE: CAPTCHA is blocking submission")
                     print("Found CAPTCHA requirement in page text")
                     return False
