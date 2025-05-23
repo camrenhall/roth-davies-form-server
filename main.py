@@ -1,19 +1,89 @@
-from fastapi import FastAPI, Form, HTTPException
-from typing import Optional
+from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from typing import Optional, Dict, Any
 import uvicorn
 import requests
 import json
 import openai
 import os
 from datetime import datetime
+import asyncio
+from collections import defaultdict
+import time
 
 app = FastAPI()
+
+# Add CORS middleware to allow requests from your website
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # In production, specify your domain
+    allow_credentials=True,
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
 
 # Configure OpenAI client
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
+# Environment variables for API keys
+DOCSBOT_TEAM_ID = os.getenv("DOCSBOT_TEAM_ID")
+DOCSBOT_BOT_ID = os.getenv("DOCSBOT_BOT_ID") 
+DOCSBOT_API_KEY = os.getenv("DOCSBOT_API_KEY")
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+TWILIO_FROM_NUMBER = os.getenv("TWILIO_FROM_NUMBER", "+19133956075")
+TWILIO_TO_NUMBER = os.getenv("TWILIO_TO_NUMBER", "+19134753876")
+ALERT_PHONE_NUMBER = "+19136020456"  # Your phone number for alerts
+
 # Webhook URL
 MAKE_WEBHOOK_URL = "https://hook.us2.make.com/ws7b3t1c2p6xnp7s0gd9zr2yr7rlitam"
+
+# Rate limiting storage (in production, use Redis)
+rate_limit_storage = defaultdict(list)
+RATE_LIMIT_REQUESTS = 100  # requests per window
+RATE_LIMIT_WINDOW = 3600  # 1 hour in seconds
+
+def check_rate_limit(client_ip: str) -> bool:
+    """Simple rate limiting check"""
+    now = time.time()
+    # Clean old requests
+    rate_limit_storage[client_ip] = [
+        req_time for req_time in rate_limit_storage[client_ip] 
+        if now - req_time < RATE_LIMIT_WINDOW
+    ]
+    
+    # Check if under limit
+    if len(rate_limit_storage[client_ip]) >= RATE_LIMIT_REQUESTS:
+        return False
+    
+    # Add current request
+    rate_limit_storage[client_ip].append(now)
+    return True
+
+async def send_error_alert(error_message: str, endpoint: str):
+    """Send SMS alert when API errors occur"""
+    try:
+        alert_message = f"Roth Davies Chatbot Error Alert: {error_message} at endpoint {endpoint}. Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        
+        # Send SMS to alert phone number
+        response = requests.post(
+            f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json",
+            auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
+            data={
+                'To': ALERT_PHONE_NUMBER,
+                'From': TWILIO_FROM_NUMBER,
+                'Body': alert_message
+            },
+            timeout=10
+        )
+        
+        if response.status_code == 201:
+            print(f"Error alert sent successfully for {endpoint}")
+        else:
+            print(f"Failed to send error alert: {response.status_code}")
+            
+    except Exception as e:
+        print(f"Failed to send error alert: {e}")
 
 def get_spam_detection_prompt(name: str, phone: str, email: str, about_case: str) -> str:
     """
@@ -74,14 +144,14 @@ Your response (one word only):"""
 
 async def check_for_spam(name: str, phone: str, email: str, about_case: str) -> bool:
     """
-    Use GPT-4.1-nano to determine if the submission is spam.
+    Use GPT-4o-mini to determine if the submission is spam.
     Returns True if spam, False if legitimate.
     """
     try:
         prompt = get_spam_detection_prompt(name, phone, email, about_case)
         
         response = openai.chat.completions.create(
-            model="gpt-4.1-nano",
+            model="gpt-4o-mini",
             messages=[
                 {
                     "role": "system", 
@@ -106,13 +176,14 @@ async def check_for_spam(name: str, phone: str, email: str, about_case: str) -> 
         
     except Exception as e:
         print(f"Error in spam detection: {e}")
+        await send_error_alert(f"OpenAI spam detection failed: {str(e)}", "/submit-lead")
         # If OpenAI fails, err on the side of caution and allow the submission
         print("Spam detection failed, allowing submission through")
         return False
 
 async def send_to_webhook(name: str, phone: str, email: str, about_case: str) -> bool:
     """
-    Send the legitimate submission to the Zapier webhook.
+    Send the legitimate submission to the webhook.
     Returns True if successful, False if failed.
     """
     try:
@@ -139,15 +210,245 @@ async def send_to_webhook(name: str, phone: str, email: str, about_case: str) ->
         else:
             print(f"Webhook failed with status code: {response.status_code}")
             print(f"Response: {response.text}")
+            await send_error_alert(f"Webhook failed with status {response.status_code}", "/submit-lead")
             return False
             
     except Exception as e:
         print(f"Error sending to webhook: {e}")
+        await send_error_alert(f"Webhook request failed: {str(e)}", "/submit-lead")
         return False
 
-# ----- Main API Endpoint -----
+# ----- NEW CHATBOT ENDPOINTS -----
+
+@app.post("/warm")
+async def warm_server(request: Request):
+    """Simple warming endpoint to keep the server alive"""
+    client_ip = request.client.host
+    
+    if not check_rate_limit(client_ip):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    
+    return {
+        "status": "warm",
+        "timestamp": datetime.now().isoformat(),
+        "message": "Server is alive and ready"
+    }
+
+@app.post("/chat-docsbot")
+async def chat_with_docsbot(
+    request: Request,
+    conversation_id: str = Form(...),
+    question: str = Form(...),
+    conversation_history: Optional[str] = Form(None),
+    metadata: Optional[str] = Form(None),
+    context_items: int = Form(3),
+    full_source: bool = Form(True)
+):
+    """Handle DocsBots chat API requests"""
+    client_ip = request.client.host
+    
+    if not check_rate_limit(client_ip):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    
+    try:
+        # Parse JSON strings if provided
+        parsed_history = json.loads(conversation_history) if conversation_history else []
+        parsed_metadata = json.loads(metadata) if metadata else {}
+        
+        # Prepare request body for DocsBots
+        request_body = {
+            "conversationId": conversation_id,
+            "question": question,
+            "conversation_history": parsed_history,
+            "metadata": parsed_metadata,
+            "context_items": context_items,
+            "human_escalation": False,
+            "followup_rating": False,
+            "document_retriever": True,
+            "full_source": full_source,
+            "stream": False
+        }
+        
+        print(f"Sending to DocsBots API: {json.dumps(request_body, indent=2)}")
+        
+        # Make request to DocsBots API
+        response = requests.post(
+            f"https://api.docsbot.ai/teams/{DOCSBOT_TEAM_ID}/bots/{DOCSBOT_BOT_ID}/chat-agent",
+            headers={
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {DOCSBOT_API_KEY}'
+            },
+            json=request_body,
+            timeout=30
+        )
+        
+        if not response.ok:
+            error_msg = f"DocsBots API returned {response.status_code}"
+            print(f"DocsBots API error: {error_msg}")
+            await send_error_alert(error_msg, "/chat-docsbot")
+            raise HTTPException(status_code=response.status_code, detail=error_msg)
+        
+        response_data = response.json()
+        print(f"DocsBots response: {json.dumps(response_data, indent=2)}")
+        
+        return {
+            "status": "success",
+            "data": response_data,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except requests.exceptions.RequestException as e:
+        error_msg = f"DocsBots API request failed: {str(e)}"
+        print(error_msg)
+        await send_error_alert(error_msg, "/chat-docsbot")
+        raise HTTPException(status_code=503, detail="Service temporarily unavailable")
+    except json.JSONDecodeError as e:
+        error_msg = f"Invalid JSON in request parameters: {str(e)}"
+        print(error_msg)
+        raise HTTPException(status_code=400, detail=error_msg)
+    except Exception as e:
+        error_msg = f"Unexpected error in chat endpoint: {str(e)}"
+        print(error_msg)
+        await send_error_alert(error_msg, "/chat-docsbot")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.post("/get-resources")
+async def get_resources_for_case(
+    request: Request,
+    conversation_id: str = Form(...),
+    question: str = Form(...),
+    metadata: Optional[str] = Form(None),
+    context_items: int = Form(5)
+):
+    """Get resources from DocsBots for case description"""
+    client_ip = request.client.host
+    
+    if not check_rate_limit(client_ip):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    
+    try:
+        # Parse metadata if provided
+        parsed_metadata = json.loads(metadata) if metadata else {}
+        
+        # Prepare request body for DocsBots
+        request_body = {
+            "conversationId": conversation_id,
+            "question": question,
+            "metadata": parsed_metadata,
+            "context_items": context_items,
+            "human_escalation": False,
+            "followup_rating": False,
+            "document_retriever": True,
+            "full_source": True,
+            "stream": False
+        }
+        
+        print(f"Getting resources from DocsBots: {json.dumps(request_body, indent=2)}")
+        
+        # Make request to DocsBots API
+        response = requests.post(
+            f"https://api.docsbot.ai/teams/{DOCSBOT_TEAM_ID}/bots/{DOCSBOT_BOT_ID}/chat-agent",
+            headers={
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {DOCSBOT_API_KEY}'
+            },
+            json=request_body,
+            timeout=30
+        )
+        
+        if not response.ok:
+            error_msg = f"DocsBots API returned {response.status_code}"
+            print(f"DocsBots API error: {error_msg}")
+            await send_error_alert(error_msg, "/get-resources")
+            raise HTTPException(status_code=response.status_code, detail=error_msg)
+        
+        response_data = response.json()
+        
+        return {
+            "status": "success",
+            "data": response_data,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except requests.exceptions.RequestException as e:
+        error_msg = f"DocsBots API request failed: {str(e)}"
+        print(error_msg)
+        await send_error_alert(error_msg, "/get-resources")
+        raise HTTPException(status_code=503, detail="Service temporarily unavailable")
+    except json.JSONDecodeError as e:
+        error_msg = f"Invalid JSON in metadata: {str(e)}"
+        print(error_msg)
+        raise HTTPException(status_code=400, detail=error_msg)
+    except Exception as e:
+        error_msg = f"Unexpected error in resources endpoint: {str(e)}"
+        print(error_msg)
+        await send_error_alert(error_msg, "/get-resources")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.post("/send-sms")
+async def send_sms_notification(
+    request: Request,
+    phone_number: str = Form(...),
+    user_name: str = Form(...),
+    case_type: str = Form(...),
+    location: str = Form(...),
+    is_referral: bool = Form(False)
+):
+    """Send SMS notification via Twilio"""
+    client_ip = request.client.host
+    
+    if not check_rate_limit(client_ip):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    
+    try:
+        # Format the message
+        message_body = f"Roth Davies Chatbot - New Incoming Client: {user_name} - {case_type} case in {location}. Phone: {phone_number}"
+        if is_referral:
+            message_body += " (Referral Request)"
+        
+        print(f"Sending SMS: {message_body}")
+        
+        # Send SMS via Twilio
+        response = requests.post(
+            f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json",
+            auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
+            data={
+                'To': TWILIO_TO_NUMBER,
+                'From': TWILIO_FROM_NUMBER,
+                'Body': message_body
+            },
+            timeout=15
+        )
+        
+        if response.status_code == 201:
+            print("SMS sent successfully")
+            return {
+                "status": "success",
+                "message": "SMS sent successfully",
+                "timestamp": datetime.now().isoformat()
+            }
+        else:
+            error_msg = f"Twilio API returned {response.status_code}"
+            print(f"Twilio error: {error_msg}, Response: {response.text}")
+            await send_error_alert(error_msg, "/send-sms")
+            raise HTTPException(status_code=response.status_code, detail=error_msg)
+            
+    except requests.exceptions.RequestException as e:
+        error_msg = f"Twilio API request failed: {str(e)}"
+        print(error_msg)
+        await send_error_alert(error_msg, "/send-sms")
+        raise HTTPException(status_code=503, detail="SMS service temporarily unavailable")
+    except Exception as e:
+        error_msg = f"Unexpected error in SMS endpoint: {str(e)}"
+        print(error_msg)
+        await send_error_alert(error_msg, "/send-sms")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+# ----- EXISTING ENDPOINTS -----
+
 @app.post("/submit-lead")
 async def submit_lead(
+    request: Request,
     name: str = Form(...),
     phone: Optional[str] = Form(None),
     email: str = Form(...),
@@ -156,6 +457,11 @@ async def submit_lead(
     """
     Main endpoint that filters spam and forwards legitimate submissions to webhook.
     """
+    client_ip = request.client.host
+    
+    if not check_rate_limit(client_ip):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    
     try:
         print(f"Received submission from {name} ({email})")
         
@@ -192,21 +498,21 @@ async def submit_lead(
         raise
     except Exception as e:
         print(f"Unexpected error processing submission: {e}")
+        await send_error_alert(f"Lead submission error: {str(e)}", "/submit-lead")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-# ----- Health Check Endpoint -----
 @app.get("/health")
 async def health_check():
     """Simple health check endpoint."""
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "service": "Law Firm Spam Filter API"
+        "service": "Law Firm Chatbot API"
     }
 
-# ----- Test Endpoint for Spam Detection -----
 @app.post("/test-spam-detection")
 async def test_spam_detection(
+    request: Request,
     name: str = Form(...),
     phone: Optional[str] = Form(None),
     email: str = Form(...),
@@ -215,6 +521,11 @@ async def test_spam_detection(
     """
     Test endpoint to check spam detection without sending to webhook.
     """
+    client_ip = request.client.host
+    
+    if not check_rate_limit(client_ip):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    
     try:
         is_spam = await check_for_spam(name, phone or "", email, about_case)
         
@@ -231,8 +542,18 @@ async def test_spam_detection(
         raise HTTPException(status_code=500, detail="Spam detection test failed")
 
 if __name__ == "__main__":
-    # Check for required environment variable
-    if not os.getenv("OPENAI_API_KEY"):
-        print("WARNING: OPENAI_API_KEY environment variable not set")
+    # Check for required environment variables
+    required_env_vars = [
+        "OPENAI_API_KEY",
+        "DOCSBOT_TEAM_ID", 
+        "DOCSBOT_BOT_ID",
+        "DOCSBOT_API_KEY",
+        "TWILIO_ACCOUNT_SID",
+        "TWILIO_AUTH_TOKEN"
+    ]
+    
+    missing_vars = [var for var in required_env_vars if not os.getenv(var)]
+    if missing_vars:
+        print(f"WARNING: Missing environment variables: {', '.join(missing_vars)}")
     
     uvicorn.run(app, host="0.0.0.0", port=10000)
