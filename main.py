@@ -181,6 +181,22 @@ async def check_for_spam(name: str, phone: str, email: str, about_case: str) -> 
         print("Spam detection failed, allowing submission through")
         return False
 
+def parse_error_code_from_content(content: str) -> int:
+    """
+    Parse error code from webhook response content.
+    Looks for patterns like [400], [500], etc.
+    Returns the parsed code or None if not found.
+    """
+    if not content:
+        return None
+    
+    # Look for pattern like [400], [500], etc.
+    match = re.search(r'\[(\d{3})\]', content)
+    if match:
+        return int(match.group(1))
+    
+    return None
+
 async def send_to_webhook(name: str, phone: str, email: str, about_case: str) -> dict:
     """
     Send the legitimate submission to the webhook.
@@ -223,21 +239,31 @@ async def send_to_webhook(name: str, phone: str, email: str, about_case: str) ->
                 'message': 'Successfully sent to webhook'
             }
         else:
+            # Parse error code from response content
+            parsed_error_code = parse_error_code_from_content(response.text)
+            effective_status_code = parsed_error_code or response.status_code
+            
             error_msg = f"Webhook failed with status code: {response.status_code}"
+            if parsed_error_code:
+                error_msg += f" (parsed error code: {parsed_error_code})"
+            
             print(f"{error_msg}")
             print(f"Webhook error response: {response.text}")
             print(f"Response headers: {dict(response.headers)}")
             
-            # Send detailed error alert including response content
-            await send_error_alert(
-                f"Webhook failed with status {response.status_code}. Response: {response.text[:200]}...",
-                "/submit-lead"
-            )
+            # Only send SMS alerts for 5xx errors (server errors)
+            if effective_status_code >= 500:
+                await send_error_alert(
+                    f"Webhook server error {effective_status_code}. Response: {response.text[:200]}...",
+                    "/submit-lead"
+                )
             
             return {
                 'success': False,
                 'response': response_details,
-                'message': f'Webhook failed with status {response.status_code}'
+                'parsed_error_code': parsed_error_code,
+                'effective_status_code': effective_status_code,
+                'message': f'Webhook failed with status {effective_status_code}'
             }
             
     except requests.exceptions.Timeout as e:
@@ -552,9 +578,12 @@ async def submit_lead(
             print(f"Failed to forward submission from {name} ({email}) to webhook")
             print(f"Webhook failure details: {webhook_result}")
             
+            # Use the effective status code (parsed from content if available)
+            effective_status_code = webhook_result.get('effective_status_code', 500)
+            
             # Include webhook response details in error
             raise HTTPException(
-                status_code=500, 
+                status_code=effective_status_code, 
                 detail={
                     "message": "Failed to process submission",
                     "webhook_error": webhook_result
@@ -567,7 +596,7 @@ async def submit_lead(
         print(f"Unexpected error processing submission: {e}")
         await send_error_alert(f"Lead submission error: {str(e)}", "/submit-lead")
         raise HTTPException(status_code=500, detail="Internal server error")
-
+    
 @app.get("/health")
 async def health_check():
     """Simple health check endpoint."""
