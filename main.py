@@ -181,10 +181,10 @@ async def check_for_spam(name: str, phone: str, email: str, about_case: str) -> 
         print("Spam detection failed, allowing submission through")
         return False
 
-async def send_to_webhook(name: str, phone: str, email: str, about_case: str) -> bool:
+async def send_to_webhook(name: str, phone: str, email: str, about_case: str) -> dict:
     """
     Send the legitimate submission to the webhook.
-    Returns True if successful, False if failed.
+    Returns dict with success status and response details.
     """
     try:
         # Prepare the form data
@@ -204,19 +204,74 @@ async def send_to_webhook(name: str, phone: str, email: str, about_case: str) ->
             timeout=30
         )
         
+        # Capture response details
+        response_details = {
+            'status_code': response.status_code,
+            'headers': dict(response.headers),
+            'content': response.text,
+            'url': response.url,
+            'elapsed_seconds': response.elapsed.total_seconds()
+        }
+        
         if response.status_code == 200:
             print("Successfully sent to webhook")
-            return True
-        else:
-            print(f"Webhook failed with status code: {response.status_code}")
-            print(f"Response: {response.text}")
-            await send_error_alert(f"Webhook failed with status {response.status_code}", "/submit-lead")
-            return False
+            print(f"Webhook response: Status={response.status_code}, Content={response.text}")
             
+            return {
+                'success': True,
+                'response': response_details,
+                'message': 'Successfully sent to webhook'
+            }
+        else:
+            error_msg = f"Webhook failed with status code: {response.status_code}"
+            print(f"{error_msg}")
+            print(f"Webhook error response: {response.text}")
+            print(f"Response headers: {dict(response.headers)}")
+            
+            # Send detailed error alert including response content
+            await send_error_alert(
+                f"Webhook failed with status {response.status_code}. Response: {response.text[:200]}...",
+                "/submit-lead"
+            )
+            
+            return {
+                'success': False,
+                'response': response_details,
+                'message': f'Webhook failed with status {response.status_code}'
+            }
+            
+    except requests.exceptions.Timeout as e:
+        error_msg = f"Webhook request timed out: {str(e)}"
+        print(error_msg)
+        await send_error_alert(f"Webhook timeout: {str(e)}", "/submit-lead")
+        
+        return {
+            'success': False,
+            'response': {'error': 'timeout', 'details': str(e)},
+            'message': 'Webhook request timed out'
+        }
+        
+    except requests.exceptions.ConnectionError as e:
+        error_msg = f"Webhook connection error: {str(e)}"
+        print(error_msg)
+        await send_error_alert(f"Webhook connection failed: {str(e)}", "/submit-lead")
+        
+        return {
+            'success': False,
+            'response': {'error': 'connection_error', 'details': str(e)},
+            'message': 'Failed to connect to webhook'
+        }
+        
     except Exception as e:
-        print(f"Error sending to webhook: {e}")
+        error_msg = f"Unexpected error sending to webhook: {str(e)}"
+        print(error_msg)
         await send_error_alert(f"Webhook request failed: {str(e)}", "/submit-lead")
-        return False
+        
+        return {
+            'success': False,
+            'response': {'error': 'unexpected_error', 'details': str(e)},
+            'message': 'Unexpected error occurred'
+        }
 
 # ----- NEW CHATBOT ENDPOINTS -----
 
@@ -480,19 +535,31 @@ async def submit_lead(
                 "timestamp": datetime.now().isoformat()
             }
         
-        # Send legitimate submission to webhook
-        webhook_success = await send_to_webhook(name, phone or "", email, about_case)
+        # Send legitimate submission to webhook and get detailed response
+        webhook_result = await send_to_webhook(name, phone or "", email, about_case)
         
-        if webhook_success:
+        if webhook_result['success']:
             print(f"Submission from {name} ({email}) successfully processed and forwarded")
+            
+            # Return success with webhook response details
             return {
                 "status": "success",
                 "message": "Lead submitted successfully",
+                "webhook_response": webhook_result['response'],
                 "timestamp": datetime.now().isoformat()
             }
         else:
             print(f"Failed to forward submission from {name} ({email}) to webhook")
-            raise HTTPException(status_code=500, detail="Failed to process submission")
+            print(f"Webhook failure details: {webhook_result}")
+            
+            # Include webhook response details in error
+            raise HTTPException(
+                status_code=500, 
+                detail={
+                    "message": "Failed to process submission",
+                    "webhook_error": webhook_result
+                }
+            )
             
     except HTTPException:
         raise
