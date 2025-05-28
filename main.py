@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import uvicorn
 import requests
 import json
@@ -11,6 +11,7 @@ import asyncio
 from collections import defaultdict
 import time
 import re
+import msal
 
 app = FastAPI()
 
@@ -36,6 +37,17 @@ TWILIO_FROM_NUMBER = os.getenv("TWILIO_FROM_NUMBER", "+19133956075")
 TWILIO_TO_NUMBER = os.getenv("TWILIO_TO_NUMBER", "+19134753876")
 ALERT_PHONE_NUMBER = "+19136020456"  # Your phone number for alerts
 
+# Microsoft Graph API configuration
+MICROSOFT_CLIENT_ID = os.getenv("MICROSOFT_CLIENT_ID")
+MICROSOFT_CLIENT_SECRET = os.getenv("MICROSOFT_CLIENT_SECRET")
+MICROSOFT_TENANT_ID = os.getenv("MICROSOFT_TENANT_ID")
+MICROSOFT_SENDER_EMAIL = os.getenv("MICROSOFT_SENDER_EMAIL")  # The email address to send from
+
+# Microsoft Graph API endpoints
+MICROSOFT_AUTHORITY = f"https://login.microsoftonline.com/{MICROSOFT_TENANT_ID}"
+MICROSOFT_SCOPE = ["https://graph.microsoft.com/.default"]
+GRAPH_API_ENDPOINT = "https://graph.microsoft.com/v1.0"
+
 # Webhook URL
 MAKE_WEBHOOK_URL = "https://hook.us2.make.com/ws7b3t1c2p6xnp7s0gd9zr2yr7rlitam"
 
@@ -60,6 +72,137 @@ def check_rate_limit(client_ip: str) -> bool:
     # Add current request
     rate_limit_storage[client_ip].append(now)
     return True
+
+async def get_microsoft_access_token() -> str:
+    """
+    Get access token for Microsoft Graph API using client credentials flow.
+    This is for application-only access (no user interaction required).
+    """
+    try:
+        # Create a confidential client application
+        app = msal.ConfidentialClientApplication(
+            MICROSOFT_CLIENT_ID,
+            authority=MICROSOFT_AUTHORITY,
+            client_credential=MICROSOFT_CLIENT_SECRET,
+        )
+        
+        # Acquire token for client credentials flow
+        result = app.acquire_token_for_client(scopes=MICROSOFT_SCOPE)
+        
+        if "access_token" in result:
+            return result["access_token"]
+        else:
+            error_msg = f"Failed to acquire access token: {result.get('error_description', 'Unknown error')}"
+            print(error_msg)
+            raise Exception(error_msg)
+            
+    except Exception as e:
+        error_msg = f"Error getting Microsoft access token: {str(e)}"
+        print(error_msg)
+        raise Exception(error_msg)
+
+async def send_email_via_outlook(
+    to_email: str,
+    subject: str,
+    body: str,
+    cc_emails: Optional[List[str]] = None,
+    bcc_emails: Optional[List[str]] = None,
+    is_html: bool = True
+) -> dict:
+    """
+    Send email via Microsoft Graph API (Outlook).
+    
+    Args:
+        to_email: Recipient email address
+        subject: Email subject
+        body: Email body content
+        cc_emails: List of CC email addresses (optional)
+        bcc_emails: List of BCC email addresses (optional)
+        is_html: Whether body is HTML (default: True)
+    
+    Returns:
+        dict: Response with success status and details
+    """
+    try:
+        # Get access token
+        access_token = await get_microsoft_access_token()
+        
+        # Prepare recipients
+        recipients = [{"emailAddress": {"address": to_email}}]
+        
+        cc_recipients = []
+        if cc_emails:
+            cc_recipients = [{"emailAddress": {"address": email}} for email in cc_emails]
+        
+        bcc_recipients = []
+        if bcc_emails:
+            bcc_recipients = [{"emailAddress": {"address": email}} for email in bcc_emails]
+        
+        # Prepare email message
+        email_message = {
+            "message": {
+                "subject": subject,
+                "body": {
+                    "contentType": "HTML" if is_html else "Text",
+                    "content": body
+                },
+                "toRecipients": recipients
+            }
+        }
+        
+        # Add CC recipients if provided
+        if cc_recipients:
+            email_message["message"]["ccRecipients"] = cc_recipients
+            
+        # Add BCC recipients if provided
+        if bcc_recipients:
+            email_message["message"]["bccRecipients"] = bcc_recipients
+        
+        print(f"Sending email to {to_email} with subject: {subject}")
+        
+        # Send email via Microsoft Graph API
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json"
+        }
+        
+        # Use the sender's mailbox endpoint
+        send_url = f"{GRAPH_API_ENDPOINT}/users/{MICROSOFT_SENDER_EMAIL}/sendMail"
+        
+        response = requests.post(
+            send_url,
+            headers=headers,
+            json=email_message,
+            timeout=30
+        )
+        
+        if response.status_code == 202:  # Microsoft Graph returns 202 for successful email send
+            print("Email sent successfully via Outlook")
+            return {
+                "success": True,
+                "message": "Email sent successfully",
+                "response_code": response.status_code,
+                "timestamp": datetime.now().isoformat()
+            }
+        else:
+            error_msg = f"Microsoft Graph API returned {response.status_code}: {response.text}"
+            print(f"Email send error: {error_msg}")
+            return {
+                "success": False,
+                "error": error_msg,
+                "response_code": response.status_code,
+                "response_text": response.text,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+    except Exception as e:
+        error_msg = f"Error sending email via Outlook: {str(e)}"
+        print(error_msg)
+        return {
+            "success": False,
+            "error": error_msg,
+            "timestamp": datetime.now().isoformat()
+        }
 
 async def send_error_alert(error_message: str, endpoint: str):
     """Send SMS alert when API errors occur"""
@@ -300,7 +443,96 @@ async def send_to_webhook(name: str, phone: str, email: str, about_case: str) ->
             'message': 'Unexpected error occurred'
         }
 
-# ----- NEW CHATBOT ENDPOINTS -----
+# ----- NEW EMAIL ENDPOINT -----
+
+@app.post("/send-email")
+async def send_email(
+    request: Request,
+    to_email: str = Form(...),
+    subject: str = Form(...),
+    body: str = Form(...),
+    cc_emails: Optional[str] = Form(None),  # Comma-separated string
+    bcc_emails: Optional[str] = Form(None),  # Comma-separated string
+    is_html: bool = Form(True)
+):
+    """
+    Send email via Microsoft Outlook using Graph API.
+    
+    Args:
+        to_email: Recipient email address
+        subject: Email subject
+        body: Email body content
+        cc_emails: Comma-separated CC email addresses (optional)
+        bcc_emails: Comma-separated BCC email addresses (optional)
+        is_html: Whether body is HTML (default: True)
+    """
+    client_ip = request.client.host
+    
+    if not check_rate_limit(client_ip):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    
+    try:
+        # Validate required Microsoft Graph configuration
+        if not all([MICROSOFT_CLIENT_ID, MICROSOFT_CLIENT_SECRET, MICROSOFT_TENANT_ID, MICROSOFT_SENDER_EMAIL]):
+            raise HTTPException(
+                status_code=500, 
+                detail="Microsoft Graph API configuration missing. Please set MICROSOFT_CLIENT_ID, MICROSOFT_CLIENT_SECRET, MICROSOFT_TENANT_ID, and MICROSOFT_SENDER_EMAIL environment variables."
+            )
+        
+        # Parse CC and BCC email lists
+        cc_list = []
+        if cc_emails:
+            cc_list = [email.strip() for email in cc_emails.split(',') if email.strip()]
+        
+        bcc_list = []
+        if bcc_emails:
+            bcc_list = [email.strip() for email in bcc_emails.split(',') if email.strip()]
+        
+        print(f"Sending email to: {to_email}, Subject: {subject}")
+        if cc_list:
+            print(f"CC: {cc_list}")
+        if bcc_list:
+            print(f"BCC: {bcc_list}")
+        
+        # Send email via Microsoft Graph API
+        result = await send_email_via_outlook(
+            to_email=to_email,
+            subject=subject,
+            body=body,
+            cc_emails=cc_list if cc_list else None,
+            bcc_emails=bcc_list if bcc_list else None,
+            is_html=is_html
+        )
+        
+        if result['success']:
+            return {
+                "status": "success",
+                "message": "Email sent successfully via Outlook",
+                "details": result,
+                "timestamp": datetime.now().isoformat()
+            }
+        else:
+            # Send error alert for email failures
+            await send_error_alert(f"Email send failed: {result.get('error', 'Unknown error')}", "/send-email")
+            
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "message": "Failed to send email",
+                    "error": result.get('error', 'Unknown error'),
+                    "details": result
+                }
+            )
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        error_msg = f"Unexpected error sending email: {str(e)}"
+        print(error_msg)
+        await send_error_alert(error_msg, "/send-email")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+# ----- EXISTING CHATBOT ENDPOINTS -----
 
 @app.post("/warm")
 async def warm_server(request: Request):
@@ -557,11 +789,11 @@ async def submit_lead(
         if is_spam:
             print(f"Submission from {name} ({email}) detected as SPAM - rejected")
             return {
-                "status": "rejected",
-                "reason": "Submission detected as spam",
-                "timestamp": datetime.now().isoformat()
-            }
-        
+               "status": "rejected",
+               "reason": "Submission detected as spam",
+               "timestamp": datetime.now().isoformat()
+           }
+       
         # Send legitimate submission to webhook and get detailed response
         webhook_result = await send_to_webhook(name, phone or "", email, about_case)
         
@@ -597,7 +829,7 @@ async def submit_lead(
         print(f"Unexpected error processing submission: {e}")
         await send_error_alert(f"Lead submission error: {str(e)}", "/submit-lead")
         raise HTTPException(status_code=500, detail="Internal server error")
-    
+
 @app.get("/health")
 async def health_check():
     """Simple health check endpoint."""
@@ -638,19 +870,93 @@ async def test_spam_detection(
         print(f"Error in spam detection test: {e}")
         raise HTTPException(status_code=500, detail="Spam detection test failed")
 
+@app.post("/test-email")
+async def test_email_endpoint(request: Request):
+    """
+    Test endpoint to verify email functionality with a simple test email.
+    """
+    client_ip = request.client.host
+    
+    if not check_rate_limit(client_ip):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    
+    try:
+        # Validate Microsoft Graph configuration
+        if not all([MICROSOFT_CLIENT_ID, MICROSOFT_CLIENT_SECRET, MICROSOFT_TENANT_ID, MICROSOFT_SENDER_EMAIL]):
+            raise HTTPException(
+                status_code=500,
+                detail="Microsoft Graph API configuration missing"
+            )
+        
+        # Send a test email
+        test_subject = "Test Email from Law Firm Chatbot API"
+        test_body = f"""
+        <html>
+        <body>
+            <h2>Test Email</h2>
+            <p>This is a test email sent from the Law Firm Chatbot API at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}.</p>
+            <p>If you received this email, the Microsoft Outlook integration is working correctly.</p>
+        </body>
+        </html>
+        """
+        
+        result = await send_email_via_outlook(
+            to_email=MICROSOFT_SENDER_EMAIL,  # Send to self for testing
+            subject=test_subject,
+            body=test_body,
+            is_html=True
+        )
+        
+        if result['success']:
+            return {
+                "status": "success",
+                "message": "Test email sent successfully",
+                "details": result,
+                "timestamp": datetime.now().isoformat()
+            }
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "message": "Failed to send test email",
+                    "error": result.get('error', 'Unknown error'),
+                    "details": result
+                }
+            )
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        error_msg = f"Error in test email endpoint: {str(e)}"
+        print(error_msg)
+        raise HTTPException(status_code=500, detail=error_msg)
+
 if __name__ == "__main__":
     # Check for required environment variables
     required_env_vars = [
         "OPENAI_API_KEY",
-        "DOCSBOT_TEAM_ID", 
+        "DOCSBOT_TEAM_ID",
         "DOCSBOT_BOT_ID",
         "DOCSBOT_API_KEY",
         "TWILIO_ACCOUNT_SID",
         "TWILIO_AUTH_TOKEN"
     ]
-    
+
+    # Microsoft Graph API variables (optional but recommended)
+    microsoft_env_vars = [
+        "MICROSOFT_CLIENT_ID",
+        "MICROSOFT_CLIENT_SECRET",
+        "MICROSOFT_TENANT_ID",
+        "MICROSOFT_SENDER_EMAIL"
+    ]
+
     missing_vars = [var for var in required_env_vars if not os.getenv(var)]
     if missing_vars:
-        print(f"WARNING: Missing environment variables: {', '.join(missing_vars)}")
-    
+        print(f"WARNING: Missing required environment variables: {', '.join(missing_vars)}")
+
+    missing_microsoft_vars = [var for var in microsoft_env_vars if not os.getenv(var)]
+    if missing_microsoft_vars:
+        print(f"WARNING: Missing Microsoft Graph API environment variables: {', '.join(missing_microsoft_vars)}")
+        print("Email functionality will not work without these variables.")
+
     uvicorn.run(app, host="0.0.0.0", port=10000)
