@@ -6,7 +6,8 @@ RUN pip install --no-cache-dir \
     uvicorn \
     python-multipart \
     requests \
-    openai
+    openai \ 
+    msal
 
 WORKDIR /app
 COPY . /app
