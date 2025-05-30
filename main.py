@@ -11,7 +11,7 @@ import asyncio
 from collections import defaultdict
 import time
 import re
-import msal
+from mailersend import emails
 
 app = FastAPI()
 
@@ -37,16 +37,11 @@ TWILIO_FROM_NUMBER = os.getenv("TWILIO_FROM_NUMBER", "+19133956075")
 TWILIO_TO_NUMBER = os.getenv("TWILIO_TO_NUMBER", "+19134753876")
 ALERT_PHONE_NUMBER = "+19136020456"  # Your phone number for alerts
 
-# Microsoft Graph API configuration
-MICROSOFT_CLIENT_ID = os.getenv("MICROSOFT_CLIENT_ID")
-MICROSOFT_CLIENT_SECRET = os.getenv("MICROSOFT_CLIENT_SECRET")
-MICROSOFT_TENANT_ID = os.getenv("MICROSOFT_TENANT_ID")
-MICROSOFT_SENDER_EMAIL = os.getenv("MICROSOFT_SENDER_EMAIL")  # The email address to send from
-
-# Microsoft Graph API endpoints
-MICROSOFT_AUTHORITY = f"https://login.microsoftonline.com/{MICROSOFT_TENANT_ID}"
-MICROSOFT_SCOPE = ["https://graph.microsoft.com/.default"]
-GRAPH_API_ENDPOINT = "https://graph.microsoft.com/v1.0"
+# MailerSend configuration
+MAILERSEND_API_KEY = os.getenv("MAILERSEND_API_KEY")
+MAILERSEND_FROM_EMAIL = os.getenv("MAILERSEND_FROM_EMAIL")
+MAILERSEND_FROM_NAME = os.getenv("MAILERSEND_FROM_NAME", "Roth Davies Law Firm")
+MAILERSEND_TEMPLATE_ID = os.getenv("MAILERSEND_TEMPLATE_ID")  # Your template ID
 
 # Webhook URL
 MAKE_WEBHOOK_URL = "https://hook.us2.make.com/ws7b3t1c2p6xnp7s0gd9zr2yr7rlitam"
@@ -73,130 +68,126 @@ def check_rate_limit(client_ip: str) -> bool:
     rate_limit_storage[client_ip].append(now)
     return True
 
-async def get_microsoft_access_token() -> str:
-    """
-    Get access token for Microsoft Graph API using client credentials flow.
-    This is for application-only access (no user interaction required).
-    """
-    try:
-        # Create a confidential client application
-        app = msal.ConfidentialClientApplication(
-            MICROSOFT_CLIENT_ID,
-            authority=MICROSOFT_AUTHORITY,
-            client_credential=MICROSOFT_CLIENT_SECRET,
-        )
-        
-        # Acquire token for client credentials flow
-        result = app.acquire_token_for_client(scopes=MICROSOFT_SCOPE)
-        
-        if "access_token" in result:
-            return result["access_token"]
-        else:
-            error_msg = f"Failed to acquire access token: {result.get('error_description', 'Unknown error')}"
-            print(error_msg)
-            raise Exception(error_msg)
-            
-    except Exception as e:
-        error_msg = f"Error getting Microsoft access token: {str(e)}"
-        print(error_msg)
-        raise Exception(error_msg)
-
-async def send_email_via_outlook(
+async def send_email_via_mailersend(
     to_email: str,
-    subject: str,
-    body: str,
-    cc_emails: Optional[List[str]] = None,
-    bcc_emails: Optional[List[str]] = None,
-    is_html: bool = True
+    to_name: str = "",
+    template_id: Optional[str] = None,
+    subject: Optional[str] = None,
+    variables: Optional[Dict[str, Any]] = None,
+    html_content: Optional[str] = None,
+    text_content: Optional[str] = None,
+    from_name: Optional[str] = None
 ) -> dict:
     """
-    Send email via Microsoft Graph API (Outlook).
+    Send email via MailerSend API with template support and variable injection.
     
     Args:
         to_email: Recipient email address
-        subject: Email subject
-        body: Email body content
-        cc_emails: List of CC email addresses (optional)
-        bcc_emails: List of BCC email addresses (optional)
-        is_html: Whether body is HTML (default: True)
+        to_name: Recipient name (optional)
+        template_id: MailerSend template ID (optional, uses env var if not provided)
+        subject: Email subject (optional, template subject used if template_id provided)
+        variables: Dict of variables for template personalization
+        html_content: HTML content (used if no template_id)
+        text_content: Plain text content (used if no template_id)
+        from_name: Custom sender name (optional)
     
     Returns:
         dict: Response with success status and details
     """
     try:
-        # Get access token
-        access_token = await get_microsoft_access_token()
+        if not MAILERSEND_API_KEY:
+            raise Exception("MAILERSEND_API_KEY not configured")
         
-        # Prepare recipients
-        recipients = [{"emailAddress": {"address": to_email}}]
+        # Initialize MailerSend client
+        mailer = emails.NewEmail(MAILERSEND_API_KEY)
         
-        cc_recipients = []
-        if cc_emails:
-            cc_recipients = [{"emailAddress": {"address": email}} for email in cc_emails]
+        # Create mail body dict
+        mail_body = {}
         
-        bcc_recipients = []
-        if bcc_emails:
-            bcc_recipients = [{"emailAddress": {"address": email}} for email in bcc_emails]
+        # Set sender information
+        sender_name = from_name or MAILERSEND_FROM_NAME
+        mail_from = {
+            "name": sender_name,
+            "email": MAILERSEND_FROM_EMAIL,
+        }
         
-        # Prepare email message
-        email_message = {
-            "message": {
-                "subject": subject,
-                "body": {
-                    "contentType": "HTML" if is_html else "Text",
-                    "content": body
-                },
-                "toRecipients": recipients
+        # Set recipient information
+        recipients = [
+            {
+                "name": to_name,
+                "email": to_email,
             }
-        }
+        ]
         
-        # Add CC recipients if provided
-        if cc_recipients:
-            email_message["message"]["ccRecipients"] = cc_recipients
+        # Set sender and recipient
+        mailer.set_mail_from(mail_from, mail_body)
+        mailer.set_mail_to(recipients, mail_body)
+        
+        # Use template or direct content
+        if template_id or MAILERSEND_TEMPLATE_ID:
+            # Using template with variables
+            template_to_use = template_id or MAILERSEND_TEMPLATE_ID
+            mailer.set_template(template_to_use, mail_body)
             
-        # Add BCC recipients if provided
-        if bcc_recipients:
-            email_message["message"]["bccRecipients"] = bcc_recipients
+            # Set subject if provided (otherwise template subject is used)
+            if subject:
+                mailer.set_subject(subject, mail_body)
+            
+            # Set personalization variables if provided
+            if variables:
+                # Format variables for MailerSend personalization
+                personalization = [
+                    {
+                        "email": to_email,
+                        "data": variables
+                    }
+                ]
+                mailer.set_personalization(personalization, mail_body)
+                
+        else:
+            # Using direct content (no template)
+            if not subject:
+                raise Exception("Subject is required when not using a template")
+            
+            mailer.set_subject(subject, mail_body)
+            
+            if html_content:
+                mailer.set_html_content(html_content, mail_body)
+            
+            if text_content:
+                mailer.set_plaintext_content(text_content, mail_body)
+            
+            if not html_content and not text_content:
+                raise Exception("Either html_content or text_content is required when not using a template")
         
-        print(f"Sending email to {to_email} with subject: {subject}")
+        print(f"Sending email via MailerSend to: {to_email}, Name: {to_name}")
+        if variables:
+            print(f"Template variables: {variables}")
         
-        # Send email via Microsoft Graph API
-        headers = {
-            "Authorization": f"Bearer {access_token}",
-            "Content-Type": "application/json"
-        }
+        # Send the email
+        response = mailer.send(mail_body)
         
-        # Use the sender's mailbox endpoint
-        send_url = f"{GRAPH_API_ENDPOINT}/users/{MICROSOFT_SENDER_EMAIL}/sendMail"
-        
-        response = requests.post(
-            send_url,
-            headers=headers,
-            json=email_message,
-            timeout=30
-        )
-        
-        if response.status_code == 202:  # Microsoft Graph returns 202 for successful email send
-            print("Email sent successfully via Outlook")
+        if hasattr(response, 'status_code') and response.status_code == 202:
+            print("Email sent successfully via MailerSend")
             return {
                 "success": True,
                 "message": "Email sent successfully",
-                "response_code": response.status_code,
+                "status_code": response.status_code,
+                "response_data": response.json() if hasattr(response, 'json') else None,
                 "timestamp": datetime.now().isoformat()
             }
         else:
-            error_msg = f"Microsoft Graph API returned {response.status_code}: {response.text}"
+            error_msg = f"MailerSend API returned unexpected response: {response}"
             print(f"Email send error: {error_msg}")
             return {
                 "success": False,
                 "error": error_msg,
-                "response_code": response.status_code,
-                "response_text": response.text,
+                "status_code": getattr(response, 'status_code', 'unknown'),
                 "timestamp": datetime.now().isoformat()
             }
             
     except Exception as e:
-        error_msg = f"Error sending email via Outlook: {str(e)}"
+        error_msg = f"Error sending email via MailerSend: {str(e)}"
         print(error_msg)
         return {
             "success": False,
@@ -443,28 +434,40 @@ async def send_to_webhook(name: str, phone: str, email: str, about_case: str) ->
             'message': 'Unexpected error occurred'
         }
 
-# ----- NEW EMAIL ENDPOINT -----
+# ----- EMAIL ENDPOINTS -----
 
 @app.post("/send-email")
 async def send_email(
     request: Request,
     to_email: str = Form(...),
-    subject: str = Form(...),
-    body: str = Form(...),
-    cc_emails: Optional[str] = Form(None),  # Comma-separated string
-    bcc_emails: Optional[str] = Form(None),  # Comma-separated string
-    is_html: bool = Form(True)
+    to_name: str = Form(""),
+    template_id: Optional[str] = Form(None),
+    subject: Optional[str] = Form(None),
+    template_variables: Optional[str] = Form(None),  # JSON string of variables
+    html_content: Optional[str] = Form(None),
+    text_content: Optional[str] = Form(None),
+    from_name: Optional[str] = Form(None)
 ):
     """
-    Send email via Microsoft Outlook using Graph API.
+    Send email via MailerSend with template support and variable injection.
     
     Args:
         to_email: Recipient email address
-        subject: Email subject
-        body: Email body content
-        cc_emails: Comma-separated CC email addresses (optional)
-        bcc_emails: Comma-separated BCC email addresses (optional)
-        is_html: Whether body is HTML (default: True)
+        to_name: Recipient name (optional)
+        template_id: MailerSend template ID (optional, uses env var if not provided)
+        subject: Email subject (optional if using template)
+        template_variables: JSON string of variables for template personalization
+        html_content: HTML content (used if no template_id)
+        text_content: Plain text content (used if no template_id)
+        from_name: Custom sender name (optional)
+        
+    Example template_variables:
+    {
+        "client_name": "John Doe",
+        "case_type": "Personal Injury",
+        "consultation_date": "2025-01-15",
+        "attorney_name": "Attorney Smith"
+    }
     """
     client_ip = request.client.host
     
@@ -472,42 +475,43 @@ async def send_email(
         raise HTTPException(status_code=429, detail="Rate limit exceeded")
     
     try:
-        # Validate required Microsoft Graph configuration
-        if not all([MICROSOFT_CLIENT_ID, MICROSOFT_CLIENT_SECRET, MICROSOFT_TENANT_ID, MICROSOFT_SENDER_EMAIL]):
+        # Validate required MailerSend configuration
+        if not MAILERSEND_API_KEY or not MAILERSEND_FROM_EMAIL:
             raise HTTPException(
                 status_code=500, 
-                detail="Microsoft Graph API configuration missing. Please set MICROSOFT_CLIENT_ID, MICROSOFT_CLIENT_SECRET, MICROSOFT_TENANT_ID, and MICROSOFT_SENDER_EMAIL environment variables."
+                detail="MailerSend configuration missing. Please set MAILERSEND_API_KEY and MAILERSEND_FROM_EMAIL environment variables."
             )
         
-        # Parse CC and BCC email lists
-        cc_list = []
-        if cc_emails:
-            cc_list = [email.strip() for email in cc_emails.split(',') if email.strip()]
+        # Parse template variables if provided
+        variables = None
+        if template_variables:
+            try:
+                variables = json.loads(template_variables)
+            except json.JSONDecodeError:
+                raise HTTPException(status_code=400, detail="Invalid JSON in template_variables")
         
-        bcc_list = []
-        if bcc_emails:
-            bcc_list = [email.strip() for email in bcc_emails.split(',') if email.strip()]
+        print(f"Sending email to: {to_email}, Name: {to_name}")
+        if template_id or MAILERSEND_TEMPLATE_ID:
+            print(f"Using template: {template_id or MAILERSEND_TEMPLATE_ID}")
+        if variables:
+            print(f"Template variables: {variables}")
         
-        print(f"Sending email to: {to_email}, Subject: {subject}")
-        if cc_list:
-            print(f"CC: {cc_list}")
-        if bcc_list:
-            print(f"BCC: {bcc_list}")
-        
-        # Send email via Microsoft Graph API
-        result = await send_email_via_outlook(
+        # Send email via MailerSend
+        result = await send_email_via_mailersend(
             to_email=to_email,
+            to_name=to_name,
+            template_id=template_id,
             subject=subject,
-            body=body,
-            cc_emails=cc_list if cc_list else None,
-            bcc_emails=bcc_list if bcc_list else None,
-            is_html=is_html
+            variables=variables,
+            html_content=html_content,
+            text_content=text_content,
+            from_name=from_name
         )
         
         if result['success']:
             return {
                 "status": "success",
-                "message": "Email sent successfully via Outlook",
+                "message": "Email sent successfully via MailerSend",
                 "details": result,
                 "timestamp": datetime.now().isoformat()
             }
@@ -530,6 +534,96 @@ async def send_email(
         error_msg = f"Unexpected error sending email: {str(e)}"
         print(error_msg)
         await send_error_alert(error_msg, "/send-email")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.post("/send-template-email")
+async def send_template_email(
+    request: Request,
+    to_email: str = Form(...),
+    to_name: str = Form(""),
+    client_name: Optional[str] = Form(None),
+    case_type: Optional[str] = Form(None),
+    consultation_date: Optional[str] = Form(None),
+    attorney_name: Optional[str] = Form(None),
+    phone_number: Optional[str] = Form(None),
+    custom_message: Optional[str] = Form(None),
+    template_id: Optional[str] = Form(None)
+):
+    """
+    Convenient endpoint for sending templated emails with common law firm variables.
+    This endpoint automatically structures the variables for your MailerSend template.
+    
+    Common template variables for law firms:
+    - client_name: Client's full name
+    - case_type: Type of legal case (Personal Injury, Criminal, Divorce, etc.)
+    - consultation_date: Scheduled consultation date
+    - attorney_name: Attorney handling the case
+    - phone_number: Firm's contact number
+    - custom_message: Custom message for the client
+    """
+    client_ip = request.client.host
+    
+    if not check_rate_limit(client_ip):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    
+    try:
+        # Build template variables from form data
+        template_vars = {}
+        
+        if client_name:
+            template_vars["client_name"] = client_name
+        if case_type:
+            template_vars["case_type"] = case_type
+        if consultation_date:
+            template_vars["consultation_date"] = consultation_date
+        if attorney_name:
+            template_vars["attorney_name"] = attorney_name
+        if phone_number:
+            template_vars["phone_number"] = phone_number
+        if custom_message:
+            template_vars["custom_message"] = custom_message
+        
+        # Add default firm information
+        template_vars.update({
+            "firm_name": "Roth Davies Law Firm",
+            "firm_email": MAILERSEND_FROM_EMAIL,
+            "current_year": str(datetime.now().year)
+        })
+        
+        # Send via the main email function
+        result = await send_email_via_mailersend(
+            to_email=to_email,
+            to_name=to_name,
+            template_id=template_id,
+            variables=template_vars
+        )
+        
+        if result['success']:
+            return {
+                "status": "success",
+                "message": "Template email sent successfully",
+                "template_variables": template_vars,
+                "details": result,
+                "timestamp": datetime.now().isoformat()
+            }
+        else:
+            await send_error_alert(f"Template email send failed: {result.get('error', 'Unknown error')}", "/send-template-email")
+            
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "message": "Failed to send template email",
+                    "error": result.get('error', 'Unknown error'),
+                    "details": result
+                }
+            )
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        error_msg = f"Unexpected error sending template email: {str(e)}"
+        print(error_msg)
+        await send_error_alert(error_msg, "/send-template-email")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 # ----- EXISTING CHATBOT ENDPOINTS -----
@@ -701,216 +795,239 @@ async def get_resources_for_case(
 
 @app.post("/send-sms")
 async def send_sms_notification(
-    request: Request,
-    phone_number: str = Form(...),
-    user_name: str = Form(...),
-    case_type: str = Form(...),
-    location: str = Form(...),
-    is_referral: bool = Form(False)
+   request: Request,
+   phone_number: str = Form(...),
+   user_name: str = Form(...),
+   case_type: str = Form(...),
+   location: str = Form(...),
+   is_referral: bool = Form(False)
 ):
-    """Send SMS notification via Twilio"""
-    client_ip = request.client.host
-    
-    if not check_rate_limit(client_ip):
-        raise HTTPException(status_code=429, detail="Rate limit exceeded")
-    
-    try:
-        # Format the message
-        message_body = f"Roth Davies Chatbot - New Incoming Client: {user_name} - {case_type} case in {location}. Phone: {phone_number}"
-        if is_referral:
-            message_body += " (Referral Request)"
-        
-        print(f"Sending SMS: {message_body}")
-        
-        # Send SMS via Twilio
-        response = requests.post(
-            f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json",
-            auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
-            data={
-                'To': TWILIO_TO_NUMBER,
-                'From': TWILIO_FROM_NUMBER,
-                'Body': message_body
-            },
-            timeout=15
-        )
-        
-        if response.status_code == 201:
-            print("SMS sent successfully")
-            return {
-                "status": "success",
-                "message": "SMS sent successfully",
-                "timestamp": datetime.now().isoformat()
-            }
-        else:
-            error_msg = f"Twilio API returned {response.status_code}"
-            print(f"Twilio error: {error_msg}, Response: {response.text}")
-            await send_error_alert(error_msg, "/send-sms")
-            raise HTTPException(status_code=response.status_code, detail=error_msg)
-            
-    except requests.exceptions.RequestException as e:
-        error_msg = f"Twilio API request failed: {str(e)}"
-        print(error_msg)
-        await send_error_alert(error_msg, "/send-sms")
-        raise HTTPException(status_code=503, detail="SMS service temporarily unavailable")
-    except Exception as e:
-        error_msg = f"Unexpected error in SMS endpoint: {str(e)}"
-        print(error_msg)
-        await send_error_alert(error_msg, "/send-sms")
-        raise HTTPException(status_code=500, detail="Internal server error")
+   """Send SMS notification via Twilio"""
+   client_ip = request.client.host
+   
+   if not check_rate_limit(client_ip):
+       raise HTTPException(status_code=429, detail="Rate limit exceeded")
+   
+   try:
+       # Format the message
+       message_body = f"Roth Davies Chatbot - New Incoming Client: {user_name} - {case_type} case in {location}. Phone: {phone_number}"
+       if is_referral:
+           message_body += " (Referral Request)"
+       
+       print(f"Sending SMS: {message_body}")
+       
+       # Send SMS via Twilio
+       response = requests.post(
+           f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json",
+           auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
+           data={
+               'To': TWILIO_TO_NUMBER,
+               'From': TWILIO_FROM_NUMBER,
+               'Body': message_body
+           },
+           timeout=15
+       )
+       
+       if response.status_code == 201:
+           print("SMS sent successfully")
+           return {
+               "status": "success",
+               "message": "SMS sent successfully",
+               "timestamp": datetime.now().isoformat()
+           }
+       else:
+           error_msg = f"Twilio API returned {response.status_code}"
+           print(f"Twilio error: {error_msg}, Response: {response.text}")
+           await send_error_alert(error_msg, "/send-sms")
+           raise HTTPException(status_code=response.status_code, detail=error_msg)
+           
+   except requests.exceptions.RequestException as e:
+       error_msg = f"Twilio API request failed: {str(e)}"
+       print(error_msg)
+       await send_error_alert(error_msg, "/send-sms")
+       raise HTTPException(status_code=503, detail="SMS service temporarily unavailable")
+   except Exception as e:
+       error_msg = f"Unexpected error in SMS endpoint: {str(e)}"
+       print(error_msg)
+       await send_error_alert(error_msg, "/send-sms")
+       raise HTTPException(status_code=500, detail="Internal server error")
 
 # ----- EXISTING ENDPOINTS -----
 
 @app.post("/submit-lead")
 async def submit_lead(
-    request: Request,
-    name: str = Form(...),
-    phone: Optional[str] = Form(None),
-    email: str = Form(...),
-    about_case: str = Form(...)
+   request: Request,
+   name: str = Form(...),
+   phone: Optional[str] = Form(None),
+   email: str = Form(...),
+   about_case: str = Form(...)
 ):
-    """
-    Main endpoint that filters spam and forwards legitimate submissions to webhook.
-    """
-    client_ip = request.client.host
-    
-    if not check_rate_limit(client_ip):
-        raise HTTPException(status_code=429, detail="Rate limit exceeded")
-    
-    try:
-        print(f"Received submission from {name} ({email})")
-        
-        # Basic validation
-        if not name or not email or not about_case:
-            raise HTTPException(status_code=400, detail="Missing required fields: name, email, and about_case are required")
-        
-        # Check for spam using GPT-4o-mini
-        is_spam = await check_for_spam(name, phone or "", email, about_case)
-        
-        if is_spam:
-            print(f"Submission from {name} ({email}) detected as SPAM - rejected")
-            return {
+   """
+   Main endpoint that filters spam and forwards legitimate submissions to webhook.
+   """
+   client_ip = request.client.host
+   
+   if not check_rate_limit(client_ip):
+       raise HTTPException(status_code=429, detail="Rate limit exceeded")
+   
+   try:
+       print(f"Received submission from {name} ({email})")
+       
+       # Basic validation
+       if not name or not email or not about_case:
+           raise HTTPException(status_code=400, detail="Missing required fields: name, email, and about_case are required")
+       
+       # Check for spam using GPT-4o-mini
+       is_spam = await check_for_spam(name, phone or "", email, about_case)
+       
+       if is_spam:
+           print(f"Submission from {name} ({email}) detected as SPAM - rejected")
+           return {
                "status": "rejected",
                "reason": "Submission detected as spam",
                "timestamp": datetime.now().isoformat()
            }
        
-        # Send legitimate submission to webhook and get detailed response
-        webhook_result = await send_to_webhook(name, phone or "", email, about_case)
-        
-        if webhook_result['success']:
-            print(f"Submission from {name} ({email}) successfully processed and forwarded")
-            
-            # Return success with webhook response details
-            return {
-                "status": "success",
-                "message": "Lead submitted successfully",
-                "webhook_response": webhook_result['response'],
-                "timestamp": datetime.now().isoformat()
-            }
-        else:
-            print(f"Failed to forward submission from {name} ({email}) to webhook")
-            print(f"Webhook failure details: {webhook_result}")
-            
-            # Use the effective status code (parsed from content if available)
-            effective_status_code = webhook_result.get('effective_status_code', 500)
-            
-            # Include webhook response details in error
-            raise HTTPException(
-                status_code=effective_status_code, 
-                detail={
-                    "message": "Failed to process submission",
-                    "webhook_error": webhook_result
-                }
-            )
-            
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Unexpected error processing submission: {e}")
-        await send_error_alert(f"Lead submission error: {str(e)}", "/submit-lead")
-        raise HTTPException(status_code=500, detail="Internal server error")
-
+       # Send legitimate submission to webhook and get detailed response
+       webhook_result = await send_to_webhook(name, phone or "", email, about_case)
+       
+       if webhook_result['success']:
+           print(f"Submission from {name} ({email}) successfully processed and forwarded")
+           
+           # Return success with webhook response details
+           return {
+               "status": "success",
+               "message": "Lead submitted successfully",
+               "webhook_response": webhook_result['response'],
+               "timestamp": datetime.now().isoformat()
+           }
+       else:
+           print(f"Failed to forward submission from {name} ({email}) to webhook")
+           print(f"Webhook failure details: {webhook_result}")
+           
+           # Use the effective status code (parsed from content if available)
+           effective_status_code = webhook_result.get('effective_status_code', 500)
+           
+           # Include webhook response details in error
+           raise HTTPException(
+               status_code=effective_status_code, 
+               detail={
+                   "message": "Failed to process submission",
+                   "webhook_error": webhook_result
+               }
+           )
+           
+   except HTTPException:
+       raise
+   except Exception as e:
+       print(f"Unexpected error processing submission: {e}")
+       await send_error_alert(f"Lead submission error: {str(e)}", "/submit-lead")
+       raise HTTPException(status_code=500, detail="Internal server error")
+   
 @app.get("/health")
 async def health_check():
-    """Simple health check endpoint."""
-    return {
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "service": "Law Firm Chatbot API"
-    }
+   """Simple health check endpoint."""
+   return {
+       "status": "healthy",
+       "timestamp": datetime.now().isoformat(),
+       "service": "Law Firm Chatbot API"
+   }
 
 @app.post("/test-spam-detection")
 async def test_spam_detection(
-    request: Request,
-    name: str = Form(...),
-    phone: Optional[str] = Form(None),
-    email: str = Form(...),
-    about_case: str = Form(...)
+   request: Request,
+   name: str = Form(...),
+   phone: Optional[str] = Form(None),
+   email: str = Form(...),
+   about_case: str = Form(...)
 ):
-    """
-    Test endpoint to check spam detection without sending to webhook.
-    """
-    client_ip = request.client.host
-    
-    if not check_rate_limit(client_ip):
-        raise HTTPException(status_code=429, detail="Rate limit exceeded")
-    
-    try:
-        is_spam = await check_for_spam(name, phone or "", email, about_case)
-        
-        return {
-            "name": name,
-            "email": email,
-            "is_spam": is_spam,
-            "result": "SPAM" if is_spam else "LEGITIMATE",
-            "timestamp": datetime.now().isoformat()
-        }
-        
-    except Exception as e:
-        print(f"Error in spam detection test: {e}")
-        raise HTTPException(status_code=500, detail="Spam detection test failed")
+   """
+   Test endpoint to check spam detection without sending to webhook.
+   """
+   client_ip = request.client.host
+   
+   if not check_rate_limit(client_ip):
+       raise HTTPException(status_code=429, detail="Rate limit exceeded")
+   
+   try:
+       is_spam = await check_for_spam(name, phone or "", email, about_case)
+       
+       return {
+           "name": name,
+           "email": email,
+           "is_spam": is_spam,
+           "result": "SPAM" if is_spam else "LEGITIMATE",
+           "timestamp": datetime.now().isoformat()
+       }
+       
+   except Exception as e:
+       print(f"Error in spam detection test: {e}")
+       raise HTTPException(status_code=500, detail="Spam detection test failed")
 
 @app.post("/test-email")
 async def test_email_endpoint(request: Request):
     """
-    Test endpoint to verify email functionality with a simple test email.
+    Test endpoint to verify MailerSend email functionality with a simple test email.
     """
     client_ip = request.client.host
-    
+
     if not check_rate_limit(client_ip):
         raise HTTPException(status_code=429, detail="Rate limit exceeded")
-    
+
     try:
-        # Validate Microsoft Graph configuration
-        if not all([MICROSOFT_CLIENT_ID, MICROSOFT_CLIENT_SECRET, MICROSOFT_TENANT_ID, MICROSOFT_SENDER_EMAIL]):
+        # Validate MailerSend configuration
+        if not MAILERSEND_API_KEY or not MAILERSEND_FROM_EMAIL:
             raise HTTPException(
                 status_code=500,
-                detail="Microsoft Graph API configuration missing"
+                detail="MailerSend configuration missing. Please set MAILERSEND_API_KEY and MAILERSEND_FROM_EMAIL environment variables."
             )
-        
-        # Send a test email
-        test_subject = "Test Email from Law Firm Chatbot API"
-        test_body = f"""
-        <html>
-        <body>
-            <h2>Test Email</h2>
-            <p>This is a test email sent from the Law Firm Chatbot API at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}.</p>
-            <p>If you received this email, the Microsoft Outlook integration is working correctly.</p>
-        </body>
-        </html>
-        """
-        
-        result = await send_email_via_outlook(
-            to_email=MICROSOFT_SENDER_EMAIL,  # Send to self for testing
-            subject=test_subject,
-            body=test_body,
-            is_html=True
-        )
-        
+
+        # Test variables for template
+        test_variables = {
+            "client_name": "Test Client",
+            "case_type": "Test Case",
+            "consultation_date": datetime.now().strftime('%Y-%m-%d'),
+            "attorney_name": "Test Attorney",
+            "firm_name": "Roth Davies Law Firm",
+            "current_year": str(datetime.now().year)
+        }
+
+        # Try to send with template first, fallback to HTML if no template
+        if MAILERSEND_TEMPLATE_ID:
+            result = await send_email_via_mailersend(
+                to_email=MAILERSEND_FROM_EMAIL,  # Send to self for testing
+                to_name="Test Recipient",
+                template_id=MAILERSEND_TEMPLATE_ID,
+                variables=test_variables
+            )
+        else:
+            # Fallback to HTML email if no template configured
+            test_html = f"""
+            <html>
+            <body>
+                <h2>MailerSend Test Email</h2>
+                <p>This is a test email sent from the Law Firm Chatbot API using MailerSend at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}.</p>
+                <p>If you received this email, the MailerSend integration is working correctly.</p>
+                <hr>
+                <p><small>Sent from: {MAILERSEND_FROM_EMAIL}</small></p>
+            </body>
+            </html>
+            """
+            result = await send_email_via_mailersend(
+                to_email=MAILERSEND_FROM_EMAIL,  # Send to self for testing
+                to_name="Test Recipient",
+                subject="Test Email from Law Firm Chatbot API",
+                html_content=test_html,
+                text_content="This is a test email from the Law Firm Chatbot API using MailerSend."
+            )
+
         if result['success']:
             return {
                 "status": "success",
-                "message": "Test email sent successfully",
+                "message": "Test email sent successfully via MailerSend",
+                "template_used": bool(MAILERSEND_TEMPLATE_ID),
+                "template_id": MAILERSEND_TEMPLATE_ID,
+                "test_variables": test_variables if MAILERSEND_TEMPLATE_ID else None,
                 "details": result,
                 "timestamp": datetime.now().isoformat()
             }
@@ -923,7 +1040,7 @@ async def test_email_endpoint(request: Request):
                     "details": result
                 }
             )
-            
+
     except HTTPException:
         raise
     except Exception as e:
@@ -932,31 +1049,39 @@ async def test_email_endpoint(request: Request):
         raise HTTPException(status_code=500, detail=error_msg)
 
 if __name__ == "__main__":
-    # Check for required environment variables
-    required_env_vars = [
-        "OPENAI_API_KEY",
-        "DOCSBOT_TEAM_ID",
-        "DOCSBOT_BOT_ID",
-        "DOCSBOT_API_KEY",
-        "TWILIO_ACCOUNT_SID",
-        "TWILIO_AUTH_TOKEN"
-    ]
-
-    # Microsoft Graph API variables (optional but recommended)
-    microsoft_env_vars = [
-        "MICROSOFT_CLIENT_ID",
-        "MICROSOFT_CLIENT_SECRET",
-        "MICROSOFT_TENANT_ID",
-        "MICROSOFT_SENDER_EMAIL"
-    ]
-
-    missing_vars = [var for var in required_env_vars if not os.getenv(var)]
-    if missing_vars:
-        print(f"WARNING: Missing required environment variables: {', '.join(missing_vars)}")
-
-    missing_microsoft_vars = [var for var in microsoft_env_vars if not os.getenv(var)]
-    if missing_microsoft_vars:
-        print(f"WARNING: Missing Microsoft Graph API environment variables: {', '.join(missing_microsoft_vars)}")
-        print("Email functionality will not work without these variables.")
-
-    uvicorn.run(app, host="0.0.0.0", port=10000)
+   # Check for required environment variables
+   required_env_vars = [
+       "OPENAI_API_KEY",
+       "DOCSBOT_TEAM_ID", 
+       "DOCSBOT_BOT_ID",
+       "DOCSBOT_API_KEY",
+       "TWILIO_ACCOUNT_SID",
+       "TWILIO_AUTH_TOKEN"
+   ]
+   
+   # MailerSend variables (required for email functionality)
+   mailersend_env_vars = [
+       "MAILERSEND_API_KEY",
+       "MAILERSEND_FROM_EMAIL"
+   ]
+   
+   # Optional MailerSend variables
+   optional_mailersend_vars = [
+       "MAILERSEND_FROM_NAME",
+       "MAILERSEND_TEMPLATE_ID"
+   ]
+   
+   missing_vars = [var for var in required_env_vars if not os.getenv(var)]
+   if missing_vars:
+       print(f"WARNING: Missing required environment variables: {', '.join(missing_vars)}")
+   
+   missing_mailersend_vars = [var for var in mailersend_env_vars if not os.getenv(var)]
+   if missing_mailersend_vars:
+       print(f"WARNING: Missing MailerSend environment variables: {', '.join(missing_mailersend_vars)}")
+       print("Email functionality will not work without these variables.")
+   
+   missing_optional_vars = [var for var in optional_mailersend_vars if not os.getenv(var)]
+   if missing_optional_vars:
+       print(f"INFO: Optional MailerSend environment variables not set: {', '.join(missing_optional_vars)}")
+   
+   uvicorn.run(app, host="0.0.0.0", port=10000)

@@ -7,7 +7,8 @@ RUN pip install --no-cache-dir \
     python-multipart \
     requests \
     openai \ 
-    msal
+    mailersend \
+    python-dotenv
 
 WORKDIR /app
 COPY . /app
