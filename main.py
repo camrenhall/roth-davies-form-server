@@ -33,18 +33,21 @@ DOCSBOT_BOT_ID = os.getenv("DOCSBOT_BOT_ID")
 DOCSBOT_API_KEY = os.getenv("DOCSBOT_API_KEY")
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
-TWILIO_FROM_NUMBER = os.getenv("TWILIO_FROM_NUMBER", "+19133956075")
-TWILIO_TO_NUMBER = os.getenv("TWILIO_TO_NUMBER", "+19134753876")
-ALERT_PHONE_NUMBER = "+19136020456"  # Your phone number for alerts
+TWILIO_FROM_NUMBER = os.getenv("TWILIO_FROM_NUMBER")
+TWILIO_TO_NUMBER = os.getenv("TWILIO_TO_NUMBER")
+ALERT_PHONE_NUMBER = os.getenv("ALERT_PHONE_NUMBER")
 
 # MailerSend configuration
 MAILERSEND_API_KEY = os.getenv("MAILERSEND_API_KEY")
 MAILERSEND_FROM_EMAIL = os.getenv("MAILERSEND_FROM_EMAIL")
-MAILERSEND_FROM_NAME = os.getenv("MAILERSEND_FROM_NAME", "Roth Davies Law Firm")
-MAILERSEND_TEMPLATE_ID = os.getenv("MAILERSEND_TEMPLATE_ID")  # Your template ID
+MAILERSEND_FROM_NAME = os.getenv("MAILERSEND_FROM_NAME")
+
+# Template IDs for different channels
+FORM_TEMPLATE_ID = os.getenv("FORM_TEMPLATE_ID")
+CHATBOT_TEMPLATE_ID = os.getenv("CHATBOT_TEMPLATE_ID")
 
 # Webhook URL
-MAKE_WEBHOOK_URL = "https://hook.us2.make.com/ws7b3t1c2p6xnp7s0gd9zr2yr7rlitam"
+MAKE_WEBHOOK_URL = os.getenv("MAKE_WEBHOOK_URL")
 
 # Rate limiting storage (in production, use Redis)
 rate_limit_storage = defaultdict(list)
@@ -80,19 +83,6 @@ async def send_email_via_mailersend(
 ) -> dict:
     """
     Send email via MailerSend API with template support and variable injection.
-    
-    Args:
-        to_email: Recipient email address
-        to_name: Recipient name (optional)
-        template_id: MailerSend template ID (optional, uses env var if not provided)
-        subject: Email subject (optional, template subject used if template_id provided)
-        variables: Dict of variables for template personalization
-        html_content: HTML content (used if no template_id)
-        text_content: Plain text content (used if no template_id)
-        from_name: Custom sender name (optional)
-    
-    Returns:
-        dict: Response with success status and details
     """
     try:
         if not MAILERSEND_API_KEY:
@@ -124,10 +114,9 @@ async def send_email_via_mailersend(
         mailer.set_mail_to(recipients, mail_body)
         
         # Use template or direct content
-        if template_id or MAILERSEND_TEMPLATE_ID:
+        if template_id:
             # Using template with variables
-            template_to_use = template_id or MAILERSEND_TEMPLATE_ID
-            mailer.set_template(template_to_use, mail_body)
+            mailer.set_template(template_id, mail_body)
             
             # Set subject if provided (otherwise template subject is used)
             if subject:
@@ -332,26 +321,18 @@ def parse_error_code_from_content(content: str) -> int:
     
     return None
 
-async def send_to_webhook(name: str, phone: str, email: str, about_case: str) -> dict:
+async def send_to_webhook(webhook_data: dict) -> dict:
     """
-    Send the legitimate submission to the webhook.
+    Send the submission data to the webhook in a unified format.
     Returns dict with success status and response details.
     """
     try:
-        # Prepare the form data
-        form_data = {
-            'name': name,
-            'phone': phone,
-            'email': email,
-            'about_case': about_case
-        }
-        
-        print(f"Sending to webhook: {form_data}")
+        print(f"Sending to webhook: {webhook_data}")
         
         # Send POST request to make.com webhook
         response = requests.post(
             MAKE_WEBHOOK_URL,
-            data=form_data,
+            data=webhook_data,
             timeout=30
         )
         
@@ -434,40 +415,81 @@ async def send_to_webhook(name: str, phone: str, email: str, about_case: str) ->
             'message': 'Unexpected error occurred'
         }
 
-# ----- EMAIL ENDPOINTS -----
+async def send_sms_notification(phone_number: str, user_name: str, source: str, case_info: str, is_referral: bool = False):
+    """Send SMS notification via Twilio"""
+    try:
+        # Format the message based on source
+        if source == "form":
+            message_body = f"Roth Davies Form - New Lead: {user_name} - {case_info}. Phone: {phone_number}"
+        else:  # chatbot
+            message_body = f"Roth Davies Chatbot - New Lead: {user_name} - {case_info}. Phone: {phone_number}"
+        
+        if is_referral:
+            message_body += " (Referral Request)"
+        
+        print(f"Sending SMS: {message_body}")
+        
+        # Send SMS via Twilio
+        response = requests.post(
+            f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json",
+            auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
+            data={
+                'To': TWILIO_TO_NUMBER,
+                'From': TWILIO_FROM_NUMBER,
+                'Body': message_body
+            },
+            timeout=15
+        )
+        
+        if response.status_code == 201:
+            print("SMS sent successfully")
+            return True
+        else:
+            error_msg = f"Twilio API returned {response.status_code}"
+            print(f"Twilio error: {error_msg}, Response: {response.text}")
+            await send_error_alert(error_msg, "/submit-lead")
+            return False
+            
+    except requests.exceptions.RequestException as e:
+        error_msg = f"Twilio API request failed: {str(e)}"
+        print(error_msg)
+        await send_error_alert(error_msg, "/submit-lead")
+        return False
+    except Exception as e:
+        error_msg = f"Unexpected error in SMS: {str(e)}"
+        print(error_msg)
+        await send_error_alert(error_msg, "/submit-lead")
+        return False
 
-@app.post("/send-email")
-async def send_email(
+# ----- CONSOLIDATED LEAD SUBMISSION ENDPOINT -----
+
+@app.post("/submit-lead")
+async def submit_lead(
     request: Request,
-    to_email: str = Form(...),
-    to_name: str = Form(""),
-    template_id: Optional[str] = Form(None),
-    subject: Optional[str] = Form(None),
-    template_variables: Optional[str] = Form(None),  # JSON string of variables
-    html_content: Optional[str] = Form(None),
-    text_content: Optional[str] = Form(None),
-    from_name: Optional[str] = Form(None)
+    source: str = Form(...),  # "form" or "chatbot"
+    name: str = Form(...),
+    email: str = Form(...),
+    phone: Optional[str] = Form(None),
+    # Form-specific fields
+    about_case: Optional[str] = Form(None),  # Form case description
+    # Chatbot-specific fields
+    case_type: Optional[str] = Form(None),  # Chatbot case type
+    case_state: Optional[str] = Form(None),  # Chatbot case state/location
+    # Optional fields
+    is_referral: bool = Form(False)
 ):
     """
-    Send email via MailerSend with template support and variable injection.
+    Consolidated endpoint that handles both form and chatbot lead submissions.
     
     Args:
-        to_email: Recipient email address
-        to_name: Recipient name (optional)
-        template_id: MailerSend template ID (optional, uses env var if not provided)
-        subject: Email subject (optional if using template)
-        template_variables: JSON string of variables for template personalization
-        html_content: HTML content (used if no template_id)
-        text_content: Plain text content (used if no template_id)
-        from_name: Custom sender name (optional)
-        
-    Example template_variables:
-    {
-        "client_name": "John Doe",
-        "case_type": "Personal Injury",
-        "consultation_date": "2025-01-15",
-        "attorney_name": "Attorney Smith"
-    }
+        source: Either "form" or "chatbot" to determine processing flow
+        name: Lead's name (required for both)
+        email: Lead's email (required for both)
+        phone: Lead's phone number (optional)
+        about_case: Case description (form only)
+        case_type: Case type (chatbot only)
+        case_state: Case state/location (chatbot only)
+        is_referral: Whether this is a referral request
     """
     client_ip = request.client.host
     
@@ -475,158 +497,129 @@ async def send_email(
         raise HTTPException(status_code=429, detail="Rate limit exceeded")
     
     try:
-        # Validate required MailerSend configuration
-        if not MAILERSEND_API_KEY or not MAILERSEND_FROM_EMAIL:
-            raise HTTPException(
-                status_code=500, 
-                detail="MailerSend configuration missing. Please set MAILERSEND_API_KEY and MAILERSEND_FROM_EMAIL environment variables."
-            )
+        print(f"Received {source} submission from {name} ({email})")
         
-        # Parse template variables if provided
-        variables = None
-        if template_variables:
-            try:
-                variables = json.loads(template_variables)
-            except json.JSONDecodeError:
-                raise HTTPException(status_code=400, detail="Invalid JSON in template_variables")
+        # Basic validation
+        if not name or not email or source not in ["form", "chatbot"]:
+            raise HTTPException(status_code=400, detail="Missing required fields: name, email, and valid source are required")
         
-        print(f"Sending email to: {to_email}, Name: {to_name}")
-        if template_id or MAILERSEND_TEMPLATE_ID:
-            print(f"Using template: {template_id or MAILERSEND_TEMPLATE_ID}")
-        if variables:
-            print(f"Template variables: {variables}")
+        # Source-specific validation
+        if source == "form" and not about_case:
+            raise HTTPException(status_code=400, detail="about_case is required for form submissions")
         
-        # Send email via MailerSend
-        result = await send_email_via_mailersend(
-            to_email=to_email,
-            to_name=to_name,
+        if source == "chatbot" and (not case_type or not case_state):
+            raise HTTPException(status_code=400, detail="case_type and case_state are required for chatbot submissions")
+        
+        # Apply spam filter only for form submissions
+        if source == "form":
+            is_spam = await check_for_spam(name, phone or "", email, about_case)
+            
+            if is_spam:
+                print(f"Form submission from {name} ({email}) detected as SPAM - rejected")
+                return {
+                    "status": "rejected",
+                    "reason": "Submission detected as spam",
+                    "timestamp": datetime.now().isoformat()
+                }
+        
+        # Prepare template variables based on source
+        if source == "form":
+            template_id = FORM_TEMPLATE_ID
+            subject = "New Lead Form Filled Out"
+            template_variables = {
+                "lead_name": name,
+                "lead_email": email,
+                "lead_phone_number": phone or "",
+                "lead_case_description": about_case
+            }
+            case_info_for_sms = f"Case: {about_case[:50]}..." if len(about_case) > 50 else about_case
+            
+        else:  # chatbot
+            template_id = CHATBOT_TEMPLATE_ID
+            subject = "New Lead Alert"
+            template_variables = {
+                "lead_name": name,
+                "lead_phone_number": phone or "",
+                "lead_case_type": case_type,
+                "lead_case_state": case_state
+            }
+            case_info_for_sms = f"{case_type} case in {case_state}"
+        
+        # Send email notification
+        email_result = await send_email_via_mailersend(
+            to_email=email,  # This should probably be the firm's email, not the lead's email
+            to_name="",
             template_id=template_id,
             subject=subject,
-            variables=variables,
-            html_content=html_content,
-            text_content=text_content,
-            from_name=from_name
+            variables=template_variables
         )
         
-        if result['success']:
+        if not email_result['success']:
+            print(f"Email send failed: {email_result.get('error', 'Unknown error')}")
+            await send_error_alert(f"Email send failed: {email_result.get('error', 'Unknown error')}", "/submit-lead")
+        
+        # Send SMS notification
+        sms_success = await send_sms_notification(
+            phone_number=phone or "No phone provided",
+            user_name=name,
+            source=source,
+            case_info=case_info_for_sms,
+            is_referral=is_referral
+        )
+        
+        # Prepare unified webhook data
+        webhook_data = {
+            'source': source,
+            'name': name,
+            'phone': phone or "",
+            'email': email,
+            'about_case': about_case or "",  # Form field, empty for chatbot
+            'case_type': case_type or "",    # Chatbot field, empty for form
+            'case_state': case_state or "",  # Chatbot field, empty for form
+            'is_referral': str(is_referral).lower(),
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        # Send to webhook
+        webhook_result = await send_to_webhook(webhook_data)
+        
+        if webhook_result['success']:
+            print(f"{source.title()} submission from {name} ({email}) successfully processed and forwarded")
+            
             return {
                 "status": "success",
-                "message": "Email sent successfully via MailerSend",
-                "details": result,
+                "message": f"{source.title()} lead submitted successfully",
+                "email_sent": email_result['success'],
+                "sms_sent": sms_success,
+                "webhook_response": webhook_result['response'],
                 "timestamp": datetime.now().isoformat()
             }
         else:
-            # Send error alert for email failures
-            await send_error_alert(f"Email send failed: {result.get('error', 'Unknown error')}", "/send-email")
+            print(f"Failed to forward {source} submission from {name} ({email}) to webhook")
+            print(f"Webhook failure details: {webhook_result}")
             
+            # Use the effective status code (parsed from content if available)
+            effective_status_code = webhook_result.get('effective_status_code', 500)
+            
+            # Include webhook response details in error
             raise HTTPException(
-                status_code=500,
+                status_code=effective_status_code, 
                 detail={
-                    "message": "Failed to send email",
-                    "error": result.get('error', 'Unknown error'),
-                    "details": result
+                    "message": "Failed to process submission",
+                    "email_sent": email_result['success'],
+                    "sms_sent": sms_success,
+                    "webhook_error": webhook_result
                 }
             )
             
     except HTTPException:
         raise
     except Exception as e:
-        error_msg = f"Unexpected error sending email: {str(e)}"
-        print(error_msg)
-        await send_error_alert(error_msg, "/send-email")
+        print(f"Unexpected error processing {source} submission: {e}")
+        await send_error_alert(f"Lead submission error: {str(e)}", "/submit-lead")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-@app.post("/send-template-email")
-async def send_template_email(
-    request: Request,
-    to_email: str = Form(...),
-    to_name: str = Form(""),
-    client_name: Optional[str] = Form(None),
-    case_type: Optional[str] = Form(None),
-    consultation_date: Optional[str] = Form(None),
-    attorney_name: Optional[str] = Form(None),
-    phone_number: Optional[str] = Form(None),
-    custom_message: Optional[str] = Form(None),
-    template_id: Optional[str] = Form(None)
-):
-    """
-    Convenient endpoint for sending templated emails with common law firm variables.
-    This endpoint automatically structures the variables for your MailerSend template.
-    
-    Common template variables for law firms:
-    - client_name: Client's full name
-    - case_type: Type of legal case (Personal Injury, Criminal, Divorce, etc.)
-    - consultation_date: Scheduled consultation date
-    - attorney_name: Attorney handling the case
-    - phone_number: Firm's contact number
-    - custom_message: Custom message for the client
-    """
-    client_ip = request.client.host
-    
-    if not check_rate_limit(client_ip):
-        raise HTTPException(status_code=429, detail="Rate limit exceeded")
-    
-    try:
-        # Build template variables from form data
-        template_vars = {}
-        
-        if client_name:
-            template_vars["client_name"] = client_name
-        if case_type:
-            template_vars["case_type"] = case_type
-        if consultation_date:
-            template_vars["consultation_date"] = consultation_date
-        if attorney_name:
-            template_vars["attorney_name"] = attorney_name
-        if phone_number:
-            template_vars["phone_number"] = phone_number
-        if custom_message:
-            template_vars["custom_message"] = custom_message
-        
-        # Add default firm information
-        template_vars.update({
-            "firm_name": "Roth Davies Law Firm",
-            "firm_email": MAILERSEND_FROM_EMAIL,
-            "current_year": str(datetime.now().year)
-        })
-        
-        # Send via the main email function
-        result = await send_email_via_mailersend(
-            to_email=to_email,
-            to_name=to_name,
-            template_id=template_id,
-            variables=template_vars
-        )
-        
-        if result['success']:
-            return {
-                "status": "success",
-                "message": "Template email sent successfully",
-                "template_variables": template_vars,
-                "details": result,
-                "timestamp": datetime.now().isoformat()
-            }
-        else:
-            await send_error_alert(f"Template email send failed: {result.get('error', 'Unknown error')}", "/send-template-email")
-            
-            raise HTTPException(
-                status_code=500,
-                detail={
-                    "message": "Failed to send template email",
-                    "error": result.get('error', 'Unknown error'),
-                    "details": result
-                }
-            )
-            
-    except HTTPException:
-        raise
-    except Exception as e:
-        error_msg = f"Unexpected error sending template email: {str(e)}"
-        print(error_msg)
-        await send_error_alert(error_msg, "/send-template-email")
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-# ----- EXISTING CHATBOT ENDPOINTS -----
+# ----- REMAINING ENDPOINTS -----
 
 @app.post("/warm")
 async def warm_server(request: Request):
@@ -793,295 +786,59 @@ async def get_resources_for_case(
         await send_error_alert(error_msg, "/get-resources")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-@app.post("/send-sms")
-async def send_sms_notification(
-   request: Request,
-   phone_number: str = Form(...),
-   user_name: str = Form(...),
-   case_type: str = Form(...),
-   location: str = Form(...),
-   is_referral: bool = Form(False)
-):
-   """Send SMS notification via Twilio"""
-   client_ip = request.client.host
-   
-   if not check_rate_limit(client_ip):
-       raise HTTPException(status_code=429, detail="Rate limit exceeded")
-   
-   try:
-       # Format the message
-       message_body = f"Roth Davies Chatbot - New Incoming Client: {user_name} - {case_type} case in {location}. Phone: {phone_number}"
-       if is_referral:
-           message_body += " (Referral Request)"
-       
-       print(f"Sending SMS: {message_body}")
-       
-       # Send SMS via Twilio
-       response = requests.post(
-           f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json",
-           auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
-           data={
-               'To': TWILIO_TO_NUMBER,
-               'From': TWILIO_FROM_NUMBER,
-               'Body': message_body
-           },
-           timeout=15
-       )
-       
-       if response.status_code == 201:
-           print("SMS sent successfully")
-           return {
-               "status": "success",
-               "message": "SMS sent successfully",
-               "timestamp": datetime.now().isoformat()
-           }
-       else:
-           error_msg = f"Twilio API returned {response.status_code}"
-           print(f"Twilio error: {error_msg}, Response: {response.text}")
-           await send_error_alert(error_msg, "/send-sms")
-           raise HTTPException(status_code=response.status_code, detail=error_msg)
-           
-   except requests.exceptions.RequestException as e:
-       error_msg = f"Twilio API request failed: {str(e)}"
-       print(error_msg)
-       await send_error_alert(error_msg, "/send-sms")
-       raise HTTPException(status_code=503, detail="SMS service temporarily unavailable")
-   except Exception as e:
-       error_msg = f"Unexpected error in SMS endpoint: {str(e)}"
-       print(error_msg)
-       await send_error_alert(error_msg, "/send-sms")
-       raise HTTPException(status_code=500, detail="Internal server error")
-
-# ----- EXISTING ENDPOINTS -----
-
-@app.post("/submit-lead")
-async def submit_lead(
-   request: Request,
-   name: str = Form(...),
-   phone: Optional[str] = Form(None),
-   email: str = Form(...),
-   about_case: str = Form(...)
-):
-   """
-   Main endpoint that filters spam and forwards legitimate submissions to webhook.
-   """
-   client_ip = request.client.host
-   
-   if not check_rate_limit(client_ip):
-       raise HTTPException(status_code=429, detail="Rate limit exceeded")
-   
-   try:
-       print(f"Received submission from {name} ({email})")
-       
-       # Basic validation
-       if not name or not email or not about_case:
-           raise HTTPException(status_code=400, detail="Missing required fields: name, email, and about_case are required")
-       
-       # Check for spam using GPT-4o-mini
-       is_spam = await check_for_spam(name, phone or "", email, about_case)
-       
-       if is_spam:
-           print(f"Submission from {name} ({email}) detected as SPAM - rejected")
-           return {
-               "status": "rejected",
-               "reason": "Submission detected as spam",
-               "timestamp": datetime.now().isoformat()
-           }
-       
-       # Send legitimate submission to webhook and get detailed response
-       webhook_result = await send_to_webhook(name, phone or "", email, about_case)
-       
-       if webhook_result['success']:
-           print(f"Submission from {name} ({email}) successfully processed and forwarded")
-           
-           # Return success with webhook response details
-           return {
-               "status": "success",
-               "message": "Lead submitted successfully",
-               "webhook_response": webhook_result['response'],
-               "timestamp": datetime.now().isoformat()
-           }
-       else:
-           print(f"Failed to forward submission from {name} ({email}) to webhook")
-           print(f"Webhook failure details: {webhook_result}")
-           
-           # Use the effective status code (parsed from content if available)
-           effective_status_code = webhook_result.get('effective_status_code', 500)
-           
-           # Include webhook response details in error
-           raise HTTPException(
-               status_code=effective_status_code, 
-               detail={
-                   "message": "Failed to process submission",
-                   "webhook_error": webhook_result
-               }
-           )
-           
-   except HTTPException:
-       raise
-   except Exception as e:
-       print(f"Unexpected error processing submission: {e}")
-       await send_error_alert(f"Lead submission error: {str(e)}", "/submit-lead")
-       raise HTTPException(status_code=500, detail="Internal server error")
-   
 @app.get("/health")
 async def health_check():
-   """Simple health check endpoint."""
-   return {
-       "status": "healthy",
-       "timestamp": datetime.now().isoformat(),
-       "service": "Law Firm Chatbot API"
-   }
-
-@app.post("/test-spam-detection")
-async def test_spam_detection(
-   request: Request,
-   name: str = Form(...),
-   phone: Optional[str] = Form(None),
-   email: str = Form(...),
-   about_case: str = Form(...)
-):
-   """
-   Test endpoint to check spam detection without sending to webhook.
-   """
-   client_ip = request.client.host
-   
-   if not check_rate_limit(client_ip):
-       raise HTTPException(status_code=429, detail="Rate limit exceeded")
-   
-   try:
-       is_spam = await check_for_spam(name, phone or "", email, about_case)
-       
-       return {
-           "name": name,
-           "email": email,
-           "is_spam": is_spam,
-           "result": "SPAM" if is_spam else "LEGITIMATE",
-           "timestamp": datetime.now().isoformat()
-       }
-       
-   except Exception as e:
-       print(f"Error in spam detection test: {e}")
-       raise HTTPException(status_code=500, detail="Spam detection test failed")
-
-@app.post("/test-email")
-async def test_email_endpoint(request: Request):
-    """
-    Test endpoint to verify MailerSend email functionality with a simple test email.
-    """
-    client_ip = request.client.host
-
-    if not check_rate_limit(client_ip):
-        raise HTTPException(status_code=429, detail="Rate limit exceeded")
-
-    try:
-        # Validate MailerSend configuration
-        if not MAILERSEND_API_KEY or not MAILERSEND_FROM_EMAIL:
-            raise HTTPException(
-                status_code=500,
-                detail="MailerSend configuration missing. Please set MAILERSEND_API_KEY and MAILERSEND_FROM_EMAIL environment variables."
-            )
-
-        # Test variables for template
-        test_variables = {
-            "client_name": "Test Client",
-            "case_type": "Test Case",
-            "consultation_date": datetime.now().strftime('%Y-%m-%d'),
-            "attorney_name": "Test Attorney",
-            "firm_name": "Roth Davies Law Firm",
-            "current_year": str(datetime.now().year)
-        }
-
-        # Try to send with template first, fallback to HTML if no template
-        if MAILERSEND_TEMPLATE_ID:
-            result = await send_email_via_mailersend(
-                to_email=MAILERSEND_FROM_EMAIL,  # Send to self for testing
-                to_name="Test Recipient",
-                template_id=MAILERSEND_TEMPLATE_ID,
-                variables=test_variables
-            )
-        else:
-            # Fallback to HTML email if no template configured
-            test_html = f"""
-            <html>
-            <body>
-                <h2>MailerSend Test Email</h2>
-                <p>This is a test email sent from the Law Firm Chatbot API using MailerSend at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}.</p>
-                <p>If you received this email, the MailerSend integration is working correctly.</p>
-                <hr>
-                <p><small>Sent from: {MAILERSEND_FROM_EMAIL}</small></p>
-            </body>
-            </html>
-            """
-            result = await send_email_via_mailersend(
-                to_email=MAILERSEND_FROM_EMAIL,  # Send to self for testing
-                to_name="Test Recipient",
-                subject="Test Email from Law Firm Chatbot API",
-                html_content=test_html,
-                text_content="This is a test email from the Law Firm Chatbot API using MailerSend."
-            )
-
-        if result['success']:
-            return {
-                "status": "success",
-                "message": "Test email sent successfully via MailerSend",
-                "template_used": bool(MAILERSEND_TEMPLATE_ID),
-                "template_id": MAILERSEND_TEMPLATE_ID,
-                "test_variables": test_variables if MAILERSEND_TEMPLATE_ID else None,
-                "details": result,
-                "timestamp": datetime.now().isoformat()
-            }
-        else:
-            raise HTTPException(
-                status_code=500,
-                detail={
-                    "message": "Failed to send test email",
-                    "error": result.get('error', 'Unknown error'),
-                    "details": result
-                }
-            )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        error_msg = f"Error in test email endpoint: {str(e)}"
-        print(error_msg)
-        raise HTTPException(status_code=500, detail=error_msg)
+    """Simple health check endpoint."""
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "service": "Law Firm Chatbot API"
+    }
 
 if __name__ == "__main__":
-   # Check for required environment variables
-   required_env_vars = [
-       "OPENAI_API_KEY",
-       "DOCSBOT_TEAM_ID", 
-       "DOCSBOT_BOT_ID",
-       "DOCSBOT_API_KEY",
-       "TWILIO_ACCOUNT_SID",
-       "TWILIO_AUTH_TOKEN"
-   ]
-   
-   # MailerSend variables (required for email functionality)
-   mailersend_env_vars = [
-       "MAILERSEND_API_KEY",
-       "MAILERSEND_FROM_EMAIL"
-   ]
-   
-   # Optional MailerSend variables
-   optional_mailersend_vars = [
-       "MAILERSEND_FROM_NAME",
-       "MAILERSEND_TEMPLATE_ID"
-   ]
-   
-   missing_vars = [var for var in required_env_vars if not os.getenv(var)]
-   if missing_vars:
-       print(f"WARNING: Missing required environment variables: {', '.join(missing_vars)}")
-   
-   missing_mailersend_vars = [var for var in mailersend_env_vars if not os.getenv(var)]
-   if missing_mailersend_vars:
-       print(f"WARNING: Missing MailerSend environment variables: {', '.join(missing_mailersend_vars)}")
-       print("Email functionality will not work without these variables.")
-   
-   missing_optional_vars = [var for var in optional_mailersend_vars if not os.getenv(var)]
-   if missing_optional_vars:
-       print(f"INFO: Optional MailerSend environment variables not set: {', '.join(missing_optional_vars)}")
-   
-   uvicorn.run(app, host="0.0.0.0", port=10000)
+    # Check for required environment variables
+    required_env_vars = [
+        "OPENAI_API_KEY",
+        "DOCSBOT_TEAM_ID",
+        "DOCSBOT_BOT_ID",
+        "DOCSBOT_API_KEY",
+        "TWILIO_ACCOUNT_SID",
+        "TWILIO_AUTH_TOKEN"
+    ]
+
+    # MailerSend variables (required for email functionality)
+    mailersend_env_vars = [
+        "MAILERSEND_API_KEY",
+        "MAILERSEND_FROM_EMAIL"
+    ]
+
+    # Template ID variables
+    template_env_vars = [
+        "FORM_TEMPLATE_ID",
+        "CHATBOT_TEMPLATE_ID"
+    ]
+
+    # Optional MailerSend variables
+    optional_mailersend_vars = [
+        "MAILERSEND_FROM_NAME"
+    ]
+
+    missing_vars = [var for var in required_env_vars if not os.getenv(var)]
+    if missing_vars:
+        print(f"WARNING: Missing required environment variables: {', '.join(missing_vars)}")
+
+    missing_mailersend_vars = [var for var in mailersend_env_vars if not os.getenv(var)]
+    if missing_mailersend_vars:
+        print(f"WARNING: Missing MailerSend environment variables: {', '.join(missing_mailersend_vars)}")
+        print("Email functionality will not work without these variables.")
+
+    missing_template_vars = [var for var in template_env_vars if not os.getenv(var)]
+    if missing_template_vars:
+        print(f"WARNING: Missing template ID environment variables: {', '.join(missing_template_vars)}")
+        print("Using default template IDs from code.")
+
+    missing_optional_vars = [var for var in optional_mailersend_vars if not os.getenv(var)]
+    if missing_optional_vars:
+        print(f"INFO: Optional MailerSend environment variables not set: {', '.join(missing_optional_vars)}")
+    
+    uvicorn.run(app, host="0.0.0.0", port=10000)
