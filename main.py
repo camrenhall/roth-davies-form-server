@@ -502,8 +502,12 @@ async def submit_lead(
         print(f"Received {source} submission from {name} ({email})")
         
         # Basic validation
-        if not name or not email or source not in ["form", "chatbot"]:
-            raise HTTPException(status_code=400, detail="Missing required fields: name, email, and valid source are required")
+        if not name or source not in ["form", "chatbot"]:
+            raise HTTPException(status_code=400, detail="Missing required fields: name and valid source are required")
+        
+        # Email is only required for form submissions
+        if source == "form" and not email:
+            raise HTTPException(status_code=400, detail="Email is required for form submissions")
         
         # Source-specific validation
         if source == "form" and not about_case:
