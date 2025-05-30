@@ -157,7 +157,8 @@ async def send_email_via_mailersend(
         # Send the email
         response = mailer.send(mail_body)
         
-        if hasattr(response, 'status_code') and response.status_code == 202:
+        # Check for any 2xx status code (200-299) as success
+        if hasattr(response, 'status_code') and 200 <= response.status_code < 300:
             print("Email sent successfully via MailerSend")
             return {
                 "success": True,
