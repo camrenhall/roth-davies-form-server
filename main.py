@@ -41,6 +41,7 @@ ALERT_PHONE_NUMBER = os.getenv("ALERT_PHONE_NUMBER")
 MAILERSEND_API_KEY = os.getenv("MAILERSEND_API_KEY")
 MAILERSEND_FROM_EMAIL = os.getenv("MAILERSEND_FROM_EMAIL")
 MAILERSEND_FROM_NAME = os.getenv("MAILERSEND_FROM_NAME")
+FIRM_NOTIFICATION_EMAIL = os.getenv("FIRM_NOTIFICATION_EMAIL")
 
 # Template IDs for different channels
 FORM_TEMPLATE_ID = os.getenv("FORM_TEMPLATE_ID")
@@ -545,10 +546,13 @@ async def submit_lead(
             }
             case_info_for_sms = f"{case_type} case in {case_state}"
         
-        # Send email notification
+        # Send email notification to the firm (not the lead)
+        if not FIRM_NOTIFICATION_EMAIL:
+            raise HTTPException(status_code=500, detail="FIRM_NOTIFICATION_EMAIL environment variable not configured")
+            
         email_result = await send_email_via_mailersend(
-            to_email=email,  # This should probably be the firm's email, not the lead's email
-            to_name="",
+            to_email=FIRM_NOTIFICATION_EMAIL,  # Send to firm's email
+            to_name="Roth Davies Law Firm",
             template_id=template_id,
             subject=subject,
             variables=template_variables
@@ -809,7 +813,8 @@ if __name__ == "__main__":
     # MailerSend variables (required for email functionality)
     mailersend_env_vars = [
         "MAILERSEND_API_KEY",
-        "MAILERSEND_FROM_EMAIL"
+        "MAILERSEND_FROM_EMAIL",
+        "FIRM_NOTIFICATION_EMAIL"  # ADD THIS LINE
     ]
 
     # Template ID variables
