@@ -11,7 +11,6 @@ import asyncio
 from collections import defaultdict
 import time
 import re
-from mailersend import emails
 
 app = FastAPI()
 
@@ -37,15 +36,11 @@ TWILIO_FROM_NUMBER = os.getenv("TWILIO_FROM_NUMBER")
 TWILIO_TO_NUMBER = os.getenv("TWILIO_TO_NUMBER")
 ALERT_PHONE_NUMBER = os.getenv("ALERT_PHONE_NUMBER")
 
-# MailerSend configuration
-MAILERSEND_API_KEY = os.getenv("MAILERSEND_API_KEY")
-MAILERSEND_FROM_EMAIL = os.getenv("MAILERSEND_FROM_EMAIL")
-MAILERSEND_FROM_NAME = os.getenv("MAILERSEND_FROM_NAME")
+# Resend configuration
+RESEND_API_KEY = os.getenv("RESEND_API_KEY")
+RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL")
+RESEND_FROM_NAME = os.getenv("RESEND_FROM_NAME", "Roth Davies Law Firm")
 FIRM_NOTIFICATION_EMAIL = os.getenv("FIRM_NOTIFICATION_EMAIL")
-
-# Template IDs for different channels
-FORM_TEMPLATE_ID = os.getenv("FORM_TEMPLATE_ID")
-CHATBOT_TEMPLATE_ID = os.getenv("CHATBOT_TEMPLATE_ID")
 
 # Webhook URL
 MAKE_WEBHOOK_URL = os.getenv("MAKE_WEBHOOK_URL")
@@ -54,6 +49,92 @@ MAKE_WEBHOOK_URL = os.getenv("MAKE_WEBHOOK_URL")
 rate_limit_storage = defaultdict(list)
 RATE_LIMIT_REQUESTS = 100  # requests per window
 RATE_LIMIT_WINDOW = 3600  # 1 hour in seconds
+
+def get_form_email_template(lead_name: str, lead_phone: str, lead_email: str, lead_case_description: str) -> str:
+    """Generate HTML template for form submissions"""
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>New Lead Form Submission</title>
+    </head>
+    <body style="font-family: Arial, sans-serif; background-color: #f4f4f4; margin: 0; padding: 20px;">
+        <div style="max-width: 600px; margin: 0 auto; background-color: #ffffff; padding: 40px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
+            
+            <!-- Logo -->
+            <div style="text-align: center; margin-bottom: 40px;">
+                <div style="display: inline-block; background-color: #1a365d; color: white; padding: 15px 25px; border-radius: 4px;">
+                    <div style="font-size: 24px; font-weight: bold; letter-spacing: 1px;">ROTH DAVIES</div>
+                    <div style="font-size: 12px; letter-spacing: 2px; margin-top: 5px; border-top: 1px solid #ffffff; padding-top: 5px;">TRIAL LAWYERS</div>
+                </div>
+            </div>
+            
+            <!-- Main Content -->
+            <h1 style="color: #333333; font-size: 28px; margin-bottom: 20px; text-align: center;">A new lead has filled out the form!</h1>
+            
+            <p style="color: #555555; font-size: 16px; line-height: 1.6; margin-bottom: 30px;">
+                A new potential client has filled out the "Get In Touch With Us!" form on the website. 
+                Their contact details are listed below, and are stored in HighLevel for your viewing.
+            </p>
+            
+            <h2 style="color: #333333; font-size: 20px; margin-bottom: 20px;">Lead Information:</h2>
+            
+            <ul style="color: #555555; font-size: 16px; line-height: 1.8; padding-left: 20px;">
+                <li><strong>Name:</strong> {lead_name}</li>
+                <li><strong>Phone:</strong> {lead_phone}</li>
+                <li><strong>Email:</strong> <a href="mailto:{lead_email}" style="color: #1a365d; text-decoration: none;">{lead_email}</a></li>
+                <li><strong>Case Description:</strong> {lead_case_description}</li>
+            </ul>
+            
+        </div>
+    </body>
+    </html>
+    """
+
+def get_chatbot_email_template(lead_name: str, lead_phone: str, lead_case_type: str, lead_case_state: str) -> str:
+    """Generate HTML template for chatbot submissions"""
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>New Lead Chatbot Interaction</title>
+    </head>
+    <body style="font-family: Arial, sans-serif; background-color: #f4f4f4; margin: 0; padding: 20px;">
+        <div style="max-width: 600px; margin: 0 auto; background-color: #ffffff; padding: 40px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
+            
+            <!-- Logo -->
+            <div style="text-align: center; margin-bottom: 40px;">
+                <div style="display: inline-block; background-color: #1a365d; color: white; padding: 15px 25px; border-radius: 4px;">
+                    <div style="font-size: 24px; font-weight: bold; letter-spacing: 1px;">ROTH DAVIES</div>
+                    <div style="font-size: 12px; letter-spacing: 2px; margin-top: 5px; border-top: 1px solid #ffffff; padding-top: 5px;">TRIAL LAWYERS</div>
+                </div>
+            </div>
+            
+            <!-- Main Content -->
+            <h1 style="color: #333333; font-size: 28px; margin-bottom: 20px; text-align: center;">A new lead has used the Chatbot!</h1>
+            
+            <p style="color: #555555; font-size: 16px; line-height: 1.6; margin-bottom: 30px;">
+                A new potential client has interacted with the Chatbot on the website. 
+                Their contact details are listed below, and are stored in HighLevel for your viewing.
+            </p>
+            
+            <h2 style="color: #333333; font-size: 20px; margin-bottom: 20px;">Lead Information:</h2>
+            
+            <ul style="color: #555555; font-size: 16px; line-height: 1.8; padding-left: 20px;">
+                <li><strong>Name:</strong> {lead_name}</li>
+                <li><strong>Phone:</strong> {lead_phone}</li>
+                <li><strong>Case Type:</strong> {lead_case_type}</li>
+                <li><strong>Case State:</strong> {lead_case_state}</li>
+            </ul>
+            
+        </div>
+    </body>
+    </html>
+    """
 
 def check_rate_limit(client_ip: str) -> bool:
     """Simple rate limiting check"""
@@ -72,113 +153,79 @@ def check_rate_limit(client_ip: str) -> bool:
     rate_limit_storage[client_ip].append(now)
     return True
 
-async def send_email_via_mailersend(
+async def send_email_via_resend(
     to_email: str,
-    to_name: str = "",
-    template_id: Optional[str] = None,
-    subject: Optional[str] = None,
-    variables: Optional[Dict[str, Any]] = None,
-    html_content: Optional[str] = None,
-    text_content: Optional[str] = None,
+    subject: str,
+    html_content: str,
     from_name: Optional[str] = None
 ) -> dict:
     """
-    Send email via MailerSend API with template support and variable injection.
+    Send email via Resend API.
+    
+    Args:
+        to_email: Recipient email address
+        subject: Email subject
+        html_content: HTML content of the email
+        from_name: Custom sender name (optional)
+    
+    Returns:
+        dict: Response with success status and details
     """
     try:
-        if not MAILERSEND_API_KEY:
-            raise Exception("MAILERSEND_API_KEY not configured")
+        if not RESEND_API_KEY:
+            raise Exception("RESEND_API_KEY not configured")
         
-        # Initialize MailerSend client
-        mailer = emails.NewEmail(MAILERSEND_API_KEY)
+        if not RESEND_FROM_EMAIL:
+            raise Exception("RESEND_FROM_EMAIL not configured")
         
-        # Create mail body dict
-        mail_body = {}
+        # Prepare sender
+        sender_name = from_name or RESEND_FROM_NAME
+        from_address = f"{sender_name} <{RESEND_FROM_EMAIL}>"
         
-        # Set sender information
-        sender_name = from_name or MAILERSEND_FROM_NAME
-        mail_from = {
-            "name": sender_name,
-            "email": MAILERSEND_FROM_EMAIL,
+        # Prepare request payload
+        payload = {
+            "from": from_address,
+            "to": [to_email],
+            "subject": subject,
+            "html": html_content
         }
         
-        # Set recipient information
-        recipients = [
-            {
-                "name": to_name,
-                "email": to_email,
-            }
-        ]
+        print(f"Sending email via Resend to: {to_email}")
+        print(f"Subject: {subject}")
         
-        # Set sender and recipient
-        mailer.set_mail_from(mail_from, mail_body)
-        mailer.set_mail_to(recipients, mail_body)
+        # Send request to Resend API
+        response = requests.post(
+            "https://api.resend.com/emails",
+            headers={
+                "Authorization": f"Bearer {RESEND_API_KEY}",
+                "Content-Type": "application/json"
+            },
+            json=payload,
+            timeout=30
+        )
         
-        # Use template or direct content
-        if template_id:
-            # Using template with variables
-            mailer.set_template(template_id, mail_body)
-            
-            # Set subject if provided (otherwise template subject is used)
-            if subject:
-                mailer.set_subject(subject, mail_body)
-            
-            # Set personalization variables if provided
-            if variables:
-                # Format variables for MailerSend personalization
-                personalization = [
-                    {
-                        "email": to_email,
-                        "data": variables
-                    }
-                ]
-                mailer.set_personalization(personalization, mail_body)
-                
-        else:
-            # Using direct content (no template)
-            if not subject:
-                raise Exception("Subject is required when not using a template")
-            
-            mailer.set_subject(subject, mail_body)
-            
-            if html_content:
-                mailer.set_html_content(html_content, mail_body)
-            
-            if text_content:
-                mailer.set_plaintext_content(text_content, mail_body)
-            
-            if not html_content and not text_content:
-                raise Exception("Either html_content or text_content is required when not using a template")
-        
-        print(f"Sending email via MailerSend to: {to_email}, Name: {to_name}")
-        if variables:
-            print(f"Template variables: {variables}")
-        
-        # Send the email
-        response = mailer.send(mail_body)
-        
-        # Check for any 2xx status code (200-299) as success
-        if hasattr(response, 'status_code') and 200 <= response.status_code < 300:
-            print("Email sent successfully via MailerSend")
+        # Check for success (any 2xx status code)
+        if 200 <= response.status_code < 300:
+            print("Email sent successfully via Resend")
             return {
                 "success": True,
                 "message": "Email sent successfully",
                 "status_code": response.status_code,
-                "response_data": response.json() if hasattr(response, 'json') else None,
+                "response_data": response.json() if response.text else None,
                 "timestamp": datetime.now().isoformat()
             }
         else:
-            error_msg = f"MailerSend API returned unexpected response: {response}"
+            error_msg = f"Resend API returned status {response.status_code}: {response.text}"
             print(f"Email send error: {error_msg}")
             return {
                 "success": False,
                 "error": error_msg,
-                "status_code": getattr(response, 'status_code', 'unknown'),
+                "status_code": response.status_code,
                 "timestamp": datetime.now().isoformat()
             }
             
     except Exception as e:
-        error_msg = f"Error sending email via MailerSend: {str(e)}"
+        error_msg = f"Error sending email via Resend: {str(e)}"
         print(error_msg)
         return {
             "success": False,
@@ -551,16 +598,30 @@ async def submit_lead(
             }
             case_info_for_sms = f"{case_type} case in {case_state}"
         
-        # Send email notification to the firm (not the lead)
+        # Send email notification to the firm
         if not FIRM_NOTIFICATION_EMAIL:
             raise HTTPException(status_code=500, detail="FIRM_NOTIFICATION_EMAIL environment variable not configured")
-            
-        email_result = await send_email_via_mailersend(
-            to_email=FIRM_NOTIFICATION_EMAIL,  # Send to firm's email
-            to_name="Roth Davies Law Firm",
-            template_id=template_id,
+        
+        # Generate HTML content based on source
+        if source == "form":
+            html_content = get_form_email_template(
+                lead_name=name,
+                lead_phone=phone or "Not provided",
+                lead_email=email,
+                lead_case_description=about_case
+            )
+        else:  # chatbot
+            html_content = get_chatbot_email_template(
+                lead_name=name,
+                lead_phone=phone or "Not provided", 
+                lead_case_type=case_type,
+                lead_case_state=case_state
+            )
+        
+        email_result = await send_email_via_resend(
+            to_email=FIRM_NOTIFICATION_EMAIL,
             subject=subject,
-            variables=template_variables
+            html_content=html_content
         )
         
         if not email_result['success']:
@@ -815,11 +876,11 @@ if __name__ == "__main__":
         "TWILIO_AUTH_TOKEN"
     ]
 
-    # MailerSend variables (required for email functionality)
-    mailersend_env_vars = [
-        "MAILERSEND_API_KEY",
-        "MAILERSEND_FROM_EMAIL",
-        "FIRM_NOTIFICATION_EMAIL"  # ADD THIS LINE
+    # Resend variables (required for email functionality)
+    resend_env_vars = [
+        "RESEND_API_KEY",
+        "RESEND_FROM_EMAIL", 
+        "FIRM_NOTIFICATION_EMAIL"
     ]
 
     # Template ID variables
@@ -837,11 +898,11 @@ if __name__ == "__main__":
     if missing_vars:
         print(f"WARNING: Missing required environment variables: {', '.join(missing_vars)}")
 
-    missing_mailersend_vars = [var for var in mailersend_env_vars if not os.getenv(var)]
-    if missing_mailersend_vars:
-        print(f"WARNING: Missing MailerSend environment variables: {', '.join(missing_mailersend_vars)}")
+    missing_resend_vars = [var for var in resend_env_vars if not os.getenv(var)]
+    if missing_resend_vars:
+        print(f"WARNING: Missing Resend environment variables: {', '.join(missing_resend_vars)}")
         print("Email functionality will not work without these variables.")
-
+        
     missing_template_vars = [var for var in template_env_vars if not os.getenv(var)]
     if missing_template_vars:
         print(f"WARNING: Missing template ID environment variables: {', '.join(missing_template_vars)}")
