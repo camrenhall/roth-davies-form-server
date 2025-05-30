@@ -575,27 +575,13 @@ async def submit_lead(
                     "timestamp": datetime.now().isoformat()
                 }
         
-        # Prepare template variables based on source
+        # Prepare email content based on source
         if source == "form":
-            template_id = FORM_TEMPLATE_ID
             subject = "New Lead Form Filled Out"
-            template_variables = {
-                "lead_name": name,
-                "lead_email": email,
-                "lead_phone_number": phone or "",
-                "lead_case_description": about_case
-            }
             case_info_for_sms = f"Case: {about_case[:50]}..." if len(about_case) > 50 else about_case
             
         else:  # chatbot
-            template_id = CHATBOT_TEMPLATE_ID
             subject = "New Lead Alert"
-            template_variables = {
-                "lead_name": name,
-                "lead_phone_number": phone or "",
-                "lead_case_type": case_type,
-                "lead_case_state": case_state
-            }
             case_info_for_sms = f"{case_type} case in {case_state}"
         
         # Send email notification to the firm
