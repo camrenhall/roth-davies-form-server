@@ -93,8 +93,23 @@ def get_form_email_template(lead_name: str, lead_phone: str, lead_email: str, le
     </html>
     """
 
-def get_chatbot_email_template(lead_name: str, lead_phone: str, lead_case_type: str, lead_case_state: str) -> str:
+def get_chatbot_email_template(lead_name: str, lead_phone: str, lead_case_type: str, lead_case_state: str, case_description: str = None) -> str:
     """Generate HTML template for chatbot submissions"""
+    
+    # Build case info list
+    case_info_items = [
+        f"<li><strong>Name:</strong> {lead_name}</li>",
+        f"<li><strong>Phone:</strong> {lead_phone}</li>",
+        f"<li><strong>Case Type:</strong> {lead_case_type}</li>",
+        f"<li><strong>Case State:</strong> {lead_case_state}</li>"
+    ]
+    
+    # Add case description if provided
+    if case_description and case_description.strip():
+        case_info_items.append(f"<li><strong>Case Description:</strong> {case_description}</li>")
+    
+    case_info_html = "\n                ".join(case_info_items)
+    
     return f"""
     <!DOCTYPE html>
     <html>
@@ -125,10 +140,7 @@ def get_chatbot_email_template(lead_name: str, lead_phone: str, lead_case_type: 
             <h2 style="color: #333333; font-size: 20px; margin-bottom: 20px;">Lead Information:</h2>
             
             <ul style="color: #555555; font-size: 16px; line-height: 1.8; padding-left: 20px;">
-                <li><strong>Name:</strong> {lead_name}</li>
-                <li><strong>Phone:</strong> {lead_phone}</li>
-                <li><strong>Case Type:</strong> {lead_case_type}</li>
-                <li><strong>Case State:</strong> {lead_case_state}</li>
+                {case_info_html}
             </ul>
             
         </div>
@@ -519,9 +531,9 @@ async def submit_lead(
     name: str = Form(...),
     email: str = Form(...),
     phone: Optional[str] = Form(None),
-    # Form-specific fields
-    about_case: Optional[str] = Form(None),  # Form case description
-    # Chatbot-specific fields
+    # Unified case description field for both form and chatbot
+    about_case: Optional[str] = Form(None),  # Now used by both form and chatbot
+    # Chatbot-specific fields (kept for backward compatibility)
     case_type: Optional[str] = Form(None),  # Chatbot case type
     case_state: Optional[str] = Form(None),  # Chatbot case state/location
     # Optional fields
@@ -529,16 +541,7 @@ async def submit_lead(
 ):
     """
     Consolidated endpoint that handles both form and chatbot lead submissions.
-    
-    Args:
-        source: Either "form" or "chatbot" to determine processing flow
-        name: Lead's name (required for both)
-        email: Lead's email (required for both)
-        phone: Lead's phone number (optional)
-        about_case: Case description (form only)
-        case_type: Case type (chatbot only)
-        case_state: Case state/location (chatbot only)
-        is_referral: Whether this is a referral request
+    Now both sources include case descriptions in the about_case field.
     """
     client_ip = request.client.host
     
@@ -556,10 +559,11 @@ async def submit_lead(
         if source == "form" and not email:
             raise HTTPException(status_code=400, detail="Email is required for form submissions")
         
-        # Source-specific validation
-        if source == "form" and not about_case:
-            raise HTTPException(status_code=400, detail="about_case is required for form submissions")
+        # about_case is now required for both sources
+        if not about_case:
+            raise HTTPException(status_code=400, detail="about_case is required for all submissions")
         
+        # Chatbot-specific validation (still need case_type and case_state for chatbot)
         if source == "chatbot" and (not case_type or not case_state):
             raise HTTPException(status_code=400, detail="case_type and case_state are required for chatbot submissions")
         
@@ -580,29 +584,28 @@ async def submit_lead(
             subject = "New Lead Form Filled Out"
             case_info_for_sms = f"Case: {about_case[:50]}..." if len(about_case) > 50 else about_case
             
-        else:  # chatbot
-            subject = "New Lead Alert"
-            case_info_for_sms = f"{case_type} case in {case_state}"
-        
-        # Send email notification to the firm
-        if not FIRM_NOTIFICATION_EMAIL:
-            raise HTTPException(status_code=500, detail="FIRM_NOTIFICATION_EMAIL environment variable not configured")
-        
-        # Generate HTML content based on source
-        if source == "form":
             html_content = get_form_email_template(
                 lead_name=name,
                 lead_phone=phone or "Not provided",
                 lead_email=email,
                 lead_case_description=about_case
             )
+            
         else:  # chatbot
+            subject = "New Lead Alert"
+            case_info_for_sms = f"{case_type} case in {case_state}: {about_case[:30]}..." if len(about_case) > 30 else f"{case_type} case in {case_state}: {about_case}"
+            
             html_content = get_chatbot_email_template(
                 lead_name=name,
                 lead_phone=phone or "Not provided", 
                 lead_case_type=case_type,
-                lead_case_state=case_state
+                lead_case_state=case_state,
+                case_description=about_case  # Pass the case description
             )
+        
+        # Send email notification to the firm
+        if not FIRM_NOTIFICATION_EMAIL:
+            raise HTTPException(status_code=500, detail="FIRM_NOTIFICATION_EMAIL environment variable not configured")
         
         email_result = await send_email_via_resend(
             to_email=FIRM_NOTIFICATION_EMAIL,
@@ -623,13 +626,13 @@ async def submit_lead(
             is_referral=is_referral
         )
         
-        # Prepare unified webhook data
+        # Prepare unified webhook data (about_case now populated for both sources)
         webhook_data = {
             'source': source,
             'name': name,
             'phone': phone or "",
             'email': email,
-            'about_case': about_case or "",  # Form field, empty for chatbot
+            'about_case': about_case,  # Now contains case description for both sources
             'case_type': case_type or "",    # Chatbot field, empty for form
             'case_state': case_state or "",  # Chatbot field, empty for form
             'is_referral': str(is_referral).lower(),
