@@ -542,6 +542,7 @@ async def submit_lead(
     """
     Consolidated endpoint that handles both form and chatbot lead submissions.
     Now both sources include case descriptions in the about_case field.
+    Spam detection happens BEFORE detailed validation to prevent spam from causing HTTP errors.
     """
     client_ip = request.client.host
     
@@ -551,33 +552,60 @@ async def submit_lead(
     try:
         print(f"Received {source} submission from {name} ({email})")
         
-        # Basic validation
+        # BASIC validation first (only the absolute minimum to prevent crashes)
         if not name or source not in ["form", "chatbot"]:
             raise HTTPException(status_code=400, detail="Missing required fields: name and valid source are required")
         
+        # SPAM DETECTION FIRST - before detailed validation
+        # This prevents spam from causing validation errors in logs
+        if source == "form":
+            # For spam detection, treat missing fields as empty strings to avoid crashes
+            spam_name = name or ""
+            spam_phone = phone or ""
+            spam_email = email or ""
+            spam_case = about_case or ""
+            
+            is_spam = await check_for_spam(spam_name, spam_phone, spam_email, spam_case)
+            
+            if is_spam:
+                print(f"SPAM DETECTED: Form submission from {name} ({email}) - rejected silently")
+                # Return fake success to avoid giving spammers feedback about detection
+                return {
+                    "status": "success",  # Lie to the spammer
+                    "message": "Form submitted successfully",
+                    "timestamp": datetime.now().isoformat()
+                }
+        
+        # DETAILED VALIDATION ONLY AFTER spam filtering
+        # Now we know it's legitimate, so validation errors represent real issues
+        
+        # Log the complete request data for debugging legitimate submissions
+        request_data = {
+            "source": source,
+            "name": name,
+            "email": email,
+            "phone": phone,
+            "about_case": about_case,
+            "case_type": case_type,
+            "case_state": case_state,
+            "is_referral": is_referral
+        }
+        print(f"Processing legitimate {source} submission with data: {request_data}")
+        
         # Email is only required for form submissions
         if source == "form" and not email:
+            print(f"VALIDATION ERROR: Email missing for form submission. Request data: {request_data}")
             raise HTTPException(status_code=400, detail="Email is required for form submissions")
         
         # about_case is now required for both sources
         if not about_case:
-            raise HTTPException(status_code=400, detail="about_case is required for all submissions")
+            print(f"VALIDATION ERROR: Case description missing. Request data: {request_data}")
+            raise HTTPException(status_code=400, detail="Case description is required for all submissions")
         
         # Chatbot-specific validation (still need case_type and case_state for chatbot)
         if source == "chatbot" and (not case_type or not case_state):
+            print(f"VALIDATION ERROR: Missing chatbot fields. case_type='{case_type}', case_state='{case_state}'. Request data: {request_data}")
             raise HTTPException(status_code=400, detail="case_type and case_state are required for chatbot submissions")
-        
-        # Apply spam filter only for form submissions
-        if source == "form":
-            is_spam = await check_for_spam(name, phone or "", email, about_case)
-            
-            if is_spam:
-                print(f"Form submission from {name} ({email}) detected as SPAM - rejected")
-                return {
-                    "status": "rejected",
-                    "reason": "Submission detected as spam",
-                    "timestamp": datetime.now().isoformat()
-                }
         
         # Prepare email content based on source
         if source == "form":
