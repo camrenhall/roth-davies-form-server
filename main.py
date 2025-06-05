@@ -36,6 +36,11 @@ TWILIO_FROM_NUMBER = os.getenv("TWILIO_FROM_NUMBER")
 TWILIO_TO_NUMBER = os.getenv("TWILIO_TO_NUMBER")
 ALERT_PHONE_NUMBER = os.getenv("ALERT_PHONE_NUMBER")
 
+# Chatbase Environment Variables
+CHATBASE_API_KEY = os.getenv("CHATBASE_API_KEY")
+CHATBASE_CHATBOT_ID = os.getenv("CHATBASE_CHATBOT_ID")
+CHATBASE_BASE_URL = "https://www.chatbase.co/api/v1"
+
 # Resend configuration
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL")
@@ -872,6 +877,113 @@ async def get_resources_for_case(
         print(error_msg)
         await send_error_alert(error_msg, "/get-resources")
         raise HTTPException(status_code=500, detail="Internal server error")
+    
+@app.post("/chat-chatbase")
+async def chat_with_chatbase(
+    request: Request,
+    conversation_id: str = Form(...),
+    question: str = Form(...),
+    conversation_history: Optional[str] = Form(None),
+    metadata: Optional[str] = Form(None),
+    context_items: int = Form(3),
+    full_source: bool = Form(True)
+):
+    """Handle Chatbase chat API requests"""
+    client_ip = request.client.host
+    
+    if not check_rate_limit(client_ip):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    
+    try:
+        # Parse JSON strings if provided
+        parsed_history = json.loads(conversation_history) if conversation_history else []
+        parsed_metadata = json.loads(metadata) if metadata else {}
+        
+        print(f"Chatbase request - Question: {question}")
+        print(f"Conversation history length: {len(parsed_history)}")
+        print(f"Metadata: {parsed_metadata}")
+        
+        # Prepare conversation history for Chatbase format
+        chatbase_messages = []
+        
+        # Add conversation history
+        for msg in parsed_history:
+            chatbase_messages.append({
+                "role": msg.get("role", "user"),
+                "content": msg.get("content", "")
+            })
+        
+        # Add current question
+        chatbase_messages.append({
+            "role": "user", 
+            "content": question
+        })
+        
+        # Prepare request body for Chatbase
+        request_body = {
+            "messages": chatbase_messages,
+            "chatbotId": CHATBASE_CHATBOT_ID,
+            "stream": False,
+            "temperature": 0.1,  # Low temperature for consistent legal responses
+            "conversationId": conversation_id,  # For conversation tracking
+            "model": "gpt-4o-mini"  # Cost-effective model
+        }
+        
+        print(f"Sending to Chatbase API: {json.dumps(request_body, indent=2)}")
+        
+        # Make request to Chatbase API
+        response = requests.post(
+            f"{CHATBASE_BASE_URL}/chat",
+            headers={
+                'Authorization': f'Bearer {CHATBASE_API_KEY}',
+                'Content-Type': 'application/json'
+            },
+            json=request_body,
+            timeout=30
+        )
+        
+        if not response.ok:
+            error_msg = f"Chatbase API returned {response.status_code}: {response.text}"
+            print(f"Chatbase API error: {error_msg}")
+            await send_error_alert(error_msg, "/chat-chatbase")
+            raise HTTPException(status_code=response.status_code, detail=error_msg)
+        
+        response_data = response.json()
+        print(f"Chatbase response: {json.dumps(response_data, indent=2)}")
+        
+        # Transform Chatbase response to match expected format
+        chatbase_text = response_data.get('text', response_data.get('response', response_data.get('message', '')))
+        
+        # Create response in format similar to DocsBot for compatibility
+        formatted_response = [{
+            "event": "lookup_answer",
+            "data": {
+                "answer": chatbase_text,
+                "sources": []  # Chatbase doesn't return sources in the same way
+            }
+        }]
+        
+        return {
+            "status": "success",
+            "data": formatted_response,
+            "raw_chatbase_response": response_data,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except requests.exceptions.RequestException as e:
+        error_msg = f"Chatbase API request failed: {str(e)}"
+        print(error_msg)
+        await send_error_alert(error_msg, "/chat-chatbase")
+        raise HTTPException(status_code=503, detail="Service temporarily unavailable")
+    except json.JSONDecodeError as e:
+        error_msg = f"Invalid JSON in request parameters: {str(e)}"
+        print(error_msg)
+        raise HTTPException(status_code=400, detail=error_msg)
+    except Exception as e:
+        error_msg = f"Unexpected error in Chatbase chat endpoint: {str(e)}"
+        print(error_msg)
+        await send_error_alert(error_msg, "/chat-chatbase")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/health")
 async def health_check():
@@ -885,12 +997,14 @@ async def health_check():
 if __name__ == "__main__":
     # Check for required environment variables
     required_env_vars = [
-        "OPENAI_API_KEY",
-        "DOCSBOT_TEAM_ID",
-        "DOCSBOT_BOT_ID",
-        "DOCSBOT_API_KEY",
-        "TWILIO_ACCOUNT_SID",
-        "TWILIO_AUTH_TOKEN"
+    "OPENAI_API_KEY",
+    "CHATBASE_API_KEY", 
+    "CHATBASE_CHATBOT_ID",
+    "DOCSBOT_TEAM_ID",
+    "DOCSBOT_BOT_ID", 
+    "DOCSBOT_API_KEY",
+    "TWILIO_ACCOUNT_SID",
+    "TWILIO_AUTH_TOKEN"
     ]
 
     # Resend variables (required for email functionality)
