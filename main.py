@@ -36,6 +36,11 @@ TWILIO_FROM_NUMBER = os.getenv("TWILIO_FROM_NUMBER")
 TWILIO_TO_NUMBER = os.getenv("TWILIO_TO_NUMBER")
 ALERT_PHONE_NUMBER = os.getenv("ALERT_PHONE_NUMBER")
 
+# DEBUG Environment Variables
+DEBUG_MODE = os.getenv("DEBUG_MODE", "FALSE").upper()  # TRUE, TRUE_NO_GHL, or FALSE
+DEBUG_PHONE_NUMBER = os.getenv("DEBUG_PHONE_NUMBER")  # Phone number for debug SMS
+DEBUG_EMAIL = os.getenv("DEBUG_EMAIL")  # Email address for debug emails
+
 # Chatbase Environment Variables
 CHATBASE_API_KEY = os.getenv("CHATBASE_API_KEY")
 CHATBASE_CHATBOT_ID = os.getenv("CHATBASE_CHATBOT_ID")
@@ -55,8 +60,39 @@ rate_limit_storage = defaultdict(list)
 RATE_LIMIT_REQUESTS = 100  # requests per window
 RATE_LIMIT_WINDOW = 3600  # 1 hour in seconds
 
+def is_debug_mode() -> bool:
+    """Check if debug mode is enabled (either TRUE or TRUE_NO_GHL)"""
+    return DEBUG_MODE in ["TRUE", "TRUE_NO_GHL"]
+
+def should_skip_webhook() -> bool:
+    """Check if webhook should be skipped (only when TRUE_NO_GHL)"""
+    return DEBUG_MODE == "TRUE_NO_GHL"
+
+def get_notification_phone() -> str:
+    """Get the appropriate phone number for notifications based on debug mode"""
+    if is_debug_mode() and DEBUG_PHONE_NUMBER:
+        print(f"DEBUG MODE: Using debug phone number {DEBUG_PHONE_NUMBER}")
+        return DEBUG_PHONE_NUMBER
+    return TWILIO_TO_NUMBER
+
+def get_notification_email() -> str:
+    """Get the appropriate email for notifications based on debug mode"""
+    if is_debug_mode() and DEBUG_EMAIL:
+        print(f"DEBUG MODE: Using debug email {DEBUG_EMAIL}")
+        return DEBUG_EMAIL
+    return FIRM_NOTIFICATION_EMAIL
+
 def get_form_email_template(lead_name: str, lead_phone: str, lead_email: str, lead_case_description: str) -> str:
     """Generate HTML template for form submissions"""
+    debug_banner = ""
+    if is_debug_mode():
+        debug_banner = """
+        <div style="background-color: #ff6b6b; color: white; padding: 15px; text-align: center; margin-bottom: 20px; border-radius: 4px;">
+            <strong>🚨 DEBUG MODE ACTIVE 🚨</strong><br>
+            This is a test submission - not sent to production systems
+        </div>
+        """
+    
     return f"""
     <!DOCTYPE html>
     <html>
@@ -67,6 +103,8 @@ def get_form_email_template(lead_name: str, lead_phone: str, lead_email: str, le
     </head>
     <body style="font-family: Arial, sans-serif; background-color: #f4f4f4; margin: 0; padding: 20px;">
         <div style="max-width: 600px; margin: 0 auto; background-color: #ffffff; padding: 40px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
+            
+            {debug_banner}
             
             <!-- Logo -->
             <div style="text-align: center; margin-bottom: 40px;">
@@ -101,6 +139,15 @@ def get_form_email_template(lead_name: str, lead_phone: str, lead_email: str, le
 def get_chatbot_email_template(lead_name: str, lead_phone: str, lead_case_type: str, lead_case_state: str, case_description: str = None) -> str:
     """Generate HTML template for chatbot submissions"""
     
+    debug_banner = ""
+    if is_debug_mode():
+        debug_banner = """
+        <div style="background-color: #ff6b6b; color: white; padding: 15px; text-align: center; margin-bottom: 20px; border-radius: 4px;">
+            <strong>🚨 DEBUG MODE ACTIVE 🚨</strong><br>
+            This is a test submission - not sent to production systems
+        </div>
+        """
+    
     # Build case info list
     case_info_items = [
         f"<li><strong>Name:</strong> {lead_name}</li>",
@@ -125,6 +172,8 @@ def get_chatbot_email_template(lead_name: str, lead_phone: str, lead_case_type: 
     </head>
     <body style="font-family: Arial, sans-serif; background-color: #f4f4f4; margin: 0; padding: 20px;">
         <div style="max-width: 600px; margin: 0 auto; background-color: #ffffff; padding: 40px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
+            
+            {debug_banner}
             
             <!-- Logo -->
             <div style="text-align: center; margin-bottom: 40px;">
@@ -199,6 +248,10 @@ async def send_email_via_resend(
         sender_name = from_name or RESEND_FROM_NAME
         from_address = f"{sender_name} <{RESEND_FROM_EMAIL}>"
         
+        # Add debug prefix to subject if in debug mode
+        if is_debug_mode():
+            subject = f"[DEBUG] {subject}"
+        
         # Prepare request payload
         payload = {
             "from": from_address,
@@ -209,6 +262,8 @@ async def send_email_via_resend(
         
         print(f"Sending email via Resend to: {to_email}")
         print(f"Subject: {subject}")
+        if is_debug_mode():
+            print("DEBUG MODE: Email notification redirected to debug email")
         
         # Send request to Resend API
         response = requests.post(
@@ -255,12 +310,19 @@ async def send_error_alert(error_message: str, endpoint: str):
     try:
         alert_message = f"Roth Davies Chatbot Error Alert: {error_message} at endpoint {endpoint}. Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         
+        # Always send error alerts to the alert phone number (not affected by debug mode)
+        alert_phone = ALERT_PHONE_NUMBER
+        
+        if is_debug_mode():
+            alert_message = f"[DEBUG] {alert_message}"
+            print(f"DEBUG MODE: Error alert would be sent to {alert_phone}")
+        
         # Send SMS to alert phone number
         response = requests.post(
             f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json",
             auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
             data={
-                'To': ALERT_PHONE_NUMBER,
+                'To': alert_phone,
                 'From': TWILIO_FROM_NUMBER,
                 'Body': alert_message
             },
@@ -391,8 +453,23 @@ async def send_to_webhook(webhook_data: dict) -> dict:
     """
     Send the submission data to the webhook in a unified format.
     Returns dict with success status and response details.
+    Skips webhook call if DEBUG_MODE is TRUE_NO_GHL.
     """
     try:
+        # Check if we should skip the webhook
+        if should_skip_webhook():
+            print("DEBUG MODE (TRUE_NO_GHL): Skipping webhook call to GoHighLevel")
+            return {
+                'success': True,
+                'response': {'message': 'Webhook skipped in debug mode (TRUE_NO_GHL)'},
+                'message': 'Webhook skipped - debug mode active'
+            }
+        
+        if is_debug_mode():
+            print("DEBUG MODE: Sending to webhook (normal debug mode)")
+            # Add debug flag to webhook data
+            webhook_data['debug_mode'] = True
+        
         print(f"Sending to webhook: {webhook_data}")
         
         # Send POST request to make.com webhook
@@ -484,6 +561,9 @@ async def send_to_webhook(webhook_data: dict) -> dict:
 async def send_sms_notification(phone_number: str, user_name: str, source: str, case_info: str, is_referral: bool = False):
     """Send SMS notification via Twilio"""
     try:
+        # Get the appropriate phone number based on debug mode
+        notification_phone = get_notification_phone()
+        
         # Format the message based on source
         if source == "form":
             message_body = f"Roth Davies Form - New Lead: {user_name} - {case_info}. Phone: {phone_number}"
@@ -493,14 +573,21 @@ async def send_sms_notification(phone_number: str, user_name: str, source: str, 
         if is_referral:
             message_body += " (Referral Request)"
         
+        # Add debug prefix if in debug mode
+        if is_debug_mode():
+            message_body = f"[DEBUG] {message_body}"
+        
         print(f"Sending SMS: {message_body}")
+        print(f"To phone number: {notification_phone}")
+        if is_debug_mode():
+            print("DEBUG MODE: SMS notification redirected to debug phone number")
         
         # Send SMS via Twilio
         response = requests.post(
             f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json",
             auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
             data={
-                'To': TWILIO_TO_NUMBER,
+                'To': notification_phone,
                 'From': TWILIO_FROM_NUMBER,
                 'Body': message_body
             },
@@ -556,6 +643,8 @@ async def submit_lead(
     
     try:
         print(f"Received {source} submission from {name} ({email})")
+        if is_debug_mode():
+            print(f"DEBUG MODE ACTIVE: {DEBUG_MODE}")
         
         # BASIC validation first (only the absolute minimum to prevent crashes)
         if not name or source not in ["form", "chatbot"]:
@@ -612,6 +701,9 @@ async def submit_lead(
             print(f"VALIDATION ERROR: Missing chatbot fields. case_type='{case_type}', case_state='{case_state}'. Request data: {request_data}")
             raise HTTPException(status_code=400, detail="case_type and case_state are required for chatbot submissions")
         
+        # Get the appropriate notification email based on debug mode
+        notification_email = get_notification_email()
+        
         # Prepare email content based on source
         if source == "form":
             subject = "New Lead Form Filled Out"
@@ -636,12 +728,13 @@ async def submit_lead(
                 case_description=about_case  # Pass the case description
             )
         
-        # Send email notification to the firm
-        if not FIRM_NOTIFICATION_EMAIL:
-            raise HTTPException(status_code=500, detail="FIRM_NOTIFICATION_EMAIL environment variable not configured")
+        # Send email notification to the firm (or debug email)
+        if not notification_email:
+            missing_var = "DEBUG_EMAIL" if is_debug_mode() else "FIRM_NOTIFICATION_EMAIL"
+            raise HTTPException(status_code=500, detail=f"{missing_var} environment variable not configured")
         
         email_result = await send_email_via_resend(
-            to_email=FIRM_NOTIFICATION_EMAIL,
+            to_email=notification_email,
             subject=subject,
             html_content=html_content
         )
@@ -650,7 +743,7 @@ async def submit_lead(
             print(f"Email send failed: {email_result.get('error', 'Unknown error')}")
             await send_error_alert(f"Email send failed: {email_result.get('error', 'Unknown error')}", "/submit-lead")
         
-        # Send SMS notification
+        # Send SMS notification (to appropriate phone number based on debug mode)
         sms_success = await send_sms_notification(
             phone_number=phone or "No phone provided",
             user_name=name,
@@ -672,11 +765,18 @@ async def submit_lead(
             'timestamp': datetime.now().isoformat()
         }
         
-        # Send to webhook
+        # Add debug flag if in debug mode
+        if is_debug_mode():
+            webhook_data['debug_mode'] = True
+            webhook_data['debug_level'] = DEBUG_MODE
+        
+        # Send to webhook (may be skipped if DEBUG_MODE is TRUE_NO_GHL)
         webhook_result = await send_to_webhook(webhook_data)
         
         if webhook_result['success']:
             print(f"{source.title()} submission from {name} ({email}) successfully processed and forwarded")
+            if is_debug_mode():
+                print(f"DEBUG MODE: Notifications sent to debug contacts")
             
             return {
                 "status": "success",
@@ -684,6 +784,9 @@ async def submit_lead(
                 "email_sent": email_result['success'],
                 "sms_sent": sms_success,
                 "webhook_response": webhook_result['response'],
+                "debug_mode": is_debug_mode(),
+                "debug_level": DEBUG_MODE if is_debug_mode() else None,
+                "webhook_skipped": should_skip_webhook(),
                 "timestamp": datetime.now().isoformat()
             }
         else:
@@ -700,7 +803,8 @@ async def submit_lead(
                     "message": "Failed to process submission",
                     "email_sent": email_result['success'],
                     "sms_sent": sms_success,
-                    "webhook_error": webhook_result
+                    "webhook_error": webhook_result,
+                    "debug_mode": is_debug_mode()
                 }
             )
             
@@ -724,7 +828,9 @@ async def warm_server(request: Request):
     return {
         "status": "warm",
         "timestamp": datetime.now().isoformat(),
-        "message": "Server is alive and ready"
+        "message": "Server is alive and ready",
+        "debug_mode": is_debug_mode(),
+        "debug_level": DEBUG_MODE if is_debug_mode() else None
     }
 
 @app.post("/chat-docsbot")
@@ -991,7 +1097,14 @@ async def health_check():
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "service": "Law Firm Chatbot API"
+        "service": "Law Firm Chatbot API",
+        "debug_mode": is_debug_mode(),
+        "debug_level": DEBUG_MODE if is_debug_mode() else None,
+        "debug_config": {
+            "debug_phone_configured": bool(DEBUG_PHONE_NUMBER),
+            "debug_email_configured": bool(DEBUG_EMAIL),
+            "webhook_will_be_skipped": should_skip_webhook()
+        } if is_debug_mode() else None
     }
 
 if __name__ == "__main__":
@@ -1025,6 +1138,13 @@ if __name__ == "__main__":
         "MAILERSEND_FROM_NAME"
     ]
 
+    # Debug environment variables
+    debug_env_vars = [
+        "DEBUG_MODE",
+        "DEBUG_PHONE_NUMBER",
+        "DEBUG_EMAIL"
+    ]
+
     missing_vars = [var for var in required_env_vars if not os.getenv(var)]
     if missing_vars:
         print(f"WARNING: Missing required environment variables: {', '.join(missing_vars)}")
@@ -1042,5 +1162,21 @@ if __name__ == "__main__":
     missing_optional_vars = [var for var in optional_mailersend_vars if not os.getenv(var)]
     if missing_optional_vars:
         print(f"INFO: Optional MailerSend environment variables not set: {', '.join(missing_optional_vars)}")
+    
+    # Debug configuration status
+    print(f"\n=== DEBUG CONFIGURATION ===")
+    print(f"DEBUG_MODE: {DEBUG_MODE}")
+    print(f"Debug mode active: {is_debug_mode()}")
+    print(f"Webhook will be skipped: {should_skip_webhook()}")
+    
+    if is_debug_mode():
+        print(f"DEBUG_PHONE_NUMBER: {'✓ Configured' if DEBUG_PHONE_NUMBER else '✗ Not configured'}")
+        print(f"DEBUG_EMAIL: {'✓ Configured' if DEBUG_EMAIL else '✗ Not configured'}")
+        
+        if not DEBUG_PHONE_NUMBER:
+            print("WARNING: DEBUG_PHONE_NUMBER not set - SMS will go to production number")
+        if not DEBUG_EMAIL:
+            print("WARNING: DEBUG_EMAIL not set - emails will go to production email")
+    print(f"===============================\n")
     
     uvicorn.run(app, host="0.0.0.0", port=10000)
