@@ -11,6 +11,7 @@ import asyncio
 from collections import defaultdict
 import time
 import re
+import hashlib
 
 app = FastAPI()
 
@@ -59,6 +60,146 @@ MAKE_WEBHOOK_URL = os.getenv("MAKE_WEBHOOK_URL")
 rate_limit_storage = defaultdict(list)
 RATE_LIMIT_REQUESTS = 100  # requests per window
 RATE_LIMIT_WINDOW = 3600  # 1 hour in seconds
+
+# ============ NEW: DUPLICATE DETECTION STORAGE ============
+# Storage for duplicate detection (in production, use Redis with TTL)
+duplicate_detection_storage = {}  # {submission_hash: timestamp}
+DUPLICATE_DETECTION_WINDOW = 600  # 10 minutes in seconds
+DUPLICATE_CLEANUP_INTERVAL = 300  # Clean up old entries every 5 minutes
+last_cleanup_time = time.time()
+
+def normalize_phone(phone: str) -> str:
+    """
+    Normalize phone number by removing all non-digit characters
+    and handling common variations.
+    """
+    if not phone:
+        return ""
+    
+    # Remove all non-digit characters
+    digits_only = re.sub(r'\D', '', phone)
+    
+    # Handle US phone numbers - remove leading 1 if present and number is 11 digits
+    if len(digits_only) == 11 and digits_only.startswith('1'):
+        digits_only = digits_only[1:]
+    
+    return digits_only
+
+def normalize_email(email: str) -> str:
+    """
+    Normalize email address for comparison.
+    """
+    if not email:
+        return ""
+    
+    return email.lower().strip()
+
+def normalize_text(text: str) -> str:
+    """
+    Normalize text for comparison by removing extra whitespace,
+    converting to lowercase, and removing common punctuation.
+    """
+    if not text:
+        return ""
+    
+    # Convert to lowercase and strip
+    normalized = text.lower().strip()
+    
+    # Remove extra whitespace
+    normalized = re.sub(r'\s+', ' ', normalized)
+    
+    # Remove common punctuation that doesn't affect meaning
+    normalized = re.sub(r'[.,!?;:"\'-]', '', normalized)
+    
+    return normalized
+
+def generate_submission_hash(name: str, phone: str, email: str, about_case: str, source: str) -> str:
+    """
+    Generate a hash for the submission based on normalized key fields.
+    This creates a unique identifier for substantially similar submissions.
+    """
+    # Normalize all fields
+    norm_name = normalize_text(name)
+    norm_phone = normalize_phone(phone)
+    norm_email = normalize_email(email)
+    norm_case = normalize_text(about_case)
+    
+    # Create a string combining all normalized fields
+    combined = f"{norm_name}|{norm_phone}|{norm_email}|{norm_case}|{source}"
+    
+    # Generate SHA-256 hash
+    return hashlib.sha256(combined.encode('utf-8')).hexdigest()
+
+def cleanup_old_duplicates():
+    """
+    Remove old entries from duplicate detection storage.
+    Called periodically to prevent memory buildup.
+    """
+    global last_cleanup_time
+    
+    current_time = time.time()
+    
+    # Only cleanup if enough time has passed
+    if current_time - last_cleanup_time < DUPLICATE_CLEANUP_INTERVAL:
+        return
+    
+    # Remove entries older than the detection window
+    cutoff_time = current_time - DUPLICATE_DETECTION_WINDOW
+    
+    keys_to_remove = [
+        key for key, timestamp in duplicate_detection_storage.items()
+        if timestamp < cutoff_time
+    ]
+    
+    for key in keys_to_remove:
+        del duplicate_detection_storage[key]
+    
+    last_cleanup_time = current_time
+    
+    if keys_to_remove:
+        print(f"Cleaned up {len(keys_to_remove)} old duplicate detection entries")
+
+def is_duplicate_submission(name: str, phone: str, email: str, about_case: str, source: str) -> bool:
+    """
+    Check if this submission is a duplicate of a recent submission.
+    Returns True if it's a duplicate, False if it's new/unique.
+    """
+    # Clean up old entries first
+    cleanup_old_duplicates()
+    
+    # Generate hash for this submission
+    submission_hash = generate_submission_hash(name, phone, email, about_case, source)
+    
+    current_time = time.time()
+    
+    # Check if we've seen this submission recently
+    if submission_hash in duplicate_detection_storage:
+        last_seen = duplicate_detection_storage[submission_hash]
+        time_since_last = current_time - last_seen
+        
+        if time_since_last < DUPLICATE_DETECTION_WINDOW:
+            print(f"DUPLICATE DETECTED: Submission hash {submission_hash[:8]}... last seen {time_since_last:.1f} seconds ago")
+            return True
+    
+    # Record this submission
+    duplicate_detection_storage[submission_hash] = current_time
+    print(f"NEW SUBMISSION: Recorded hash {submission_hash[:8]}... at {current_time}")
+    
+    return False
+
+def log_duplicate_details(name: str, phone: str, email: str, about_case: str, source: str):
+    """
+    Log details about the duplicate submission for debugging.
+    """
+    print(f"DUPLICATE SUBMISSION DETAILS:")
+    print(f"  Name: {name}")
+    print(f"  Phone: {phone} (normalized: {normalize_phone(phone)})")
+    print(f"  Email: {email} (normalized: {normalize_email(email)})")
+    print(f"  Case: {about_case[:100]}... (normalized: {normalize_text(about_case)[:100]}...)")
+    print(f"  Source: {source}")
+    print(f"  Hash: {generate_submission_hash(name, phone, email, about_case, source)}")
+
+# ============ END NEW DUPLICATE DETECTION CODE ============
 
 def is_debug_mode() -> bool:
     """Check if debug mode is enabled (either TRUE or TRUE_NO_GHL)"""
@@ -633,8 +774,8 @@ async def submit_lead(
 ):
     """
     Consolidated endpoint that handles both form and chatbot lead submissions.
-    Now both sources include case descriptions in the about_case field.
-    Spam detection happens BEFORE detailed validation to prevent spam from causing HTTP errors.
+    Now includes intelligent duplicate detection to prevent multiple notifications
+    for the same lead within a 10-minute window.
     """
     client_ip = request.client.host
     
@@ -701,6 +842,65 @@ async def submit_lead(
             print(f"VALIDATION ERROR: Missing chatbot fields. case_type='{case_type}', case_state='{case_state}'. Request data: {request_data}")
             raise HTTPException(status_code=400, detail="case_type and case_state are required for chatbot submissions")
         
+        # ============ NEW: DUPLICATE DETECTION CHECK ============
+        # Check if this is a duplicate submission before processing
+        is_duplicate = is_duplicate_submission(
+            name=name,
+            phone=phone or "",
+            email=email or "",
+            about_case=about_case,
+            source=source
+        )
+        
+        if is_duplicate:
+            log_duplicate_details(name, phone or "", email or "", about_case, source)
+            
+            # Still send to webhook (GoHighLevel handles duplicates)
+            # but skip email and SMS notifications
+            print(f"DUPLICATE SUBMISSION: Processing webhook but skipping notifications for {name} ({email})")
+            
+            # Prepare unified webhook data
+            webhook_data = {
+                'source': source,
+                'name': name,
+                'phone': phone or "",
+                'email': email,
+                'about_case': about_case,
+                'case_type': case_type or "",
+                'case_state': case_state or "",
+                'is_referral': str(is_referral).lower(),
+                'timestamp': datetime.now().isoformat(),
+                'duplicate_detected': True  # Flag for webhook/GHL
+            }
+            
+            # Add debug flag if in debug mode
+            if is_debug_mode():
+                webhook_data['debug_mode'] = True
+                webhook_data['debug_level'] = DEBUG_MODE
+            
+            # Send to webhook only (skip notifications)
+            webhook_result = await send_to_webhook(webhook_data)
+            
+            # Return success response indicating duplicate was handled
+            return {
+                "status": "success",
+                "message": f"Duplicate {source} submission processed (notifications skipped)",
+                "duplicate_detected": True,
+                "email_sent": False,
+                "sms_sent": False,
+                "webhook_response": webhook_result.get('response', {}),
+                "webhook_success": webhook_result.get('success', False),
+                "debug_mode": is_debug_mode(),
+                "debug_level": DEBUG_MODE if is_debug_mode() else None,
+                "webhook_skipped": should_skip_webhook(),
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        # ============ END DUPLICATE DETECTION CHECK ============
+        
+        # Continue with normal processing for non-duplicate submissions
+        print(f"NEW SUBMISSION: Processing notifications for {name} ({email})")
+        
         # Get the appropriate notification email based on debug mode
         notification_email = get_notification_email()
         
@@ -725,7 +925,7 @@ async def submit_lead(
                 lead_phone=phone or "Not provided", 
                 lead_case_type=case_type,
                 lead_case_state=case_state,
-                case_description=about_case  # Pass the case description
+                case_description=about_case
             )
         
         # Send email notification to the firm (or debug email)
@@ -752,17 +952,18 @@ async def submit_lead(
             is_referral=is_referral
         )
         
-        # Prepare unified webhook data (about_case now populated for both sources)
+        # Prepare unified webhook data
         webhook_data = {
             'source': source,
             'name': name,
             'phone': phone or "",
             'email': email,
-            'about_case': about_case,  # Now contains case description for both sources
-            'case_type': case_type or "",    # Chatbot field, empty for form
-            'case_state': case_state or "",  # Chatbot field, empty for form
+            'about_case': about_case,
+            'case_type': case_type or "",
+            'case_state': case_state or "",
             'is_referral': str(is_referral).lower(),
-            'timestamp': datetime.now().isoformat()
+            'timestamp': datetime.now().isoformat(),
+            'duplicate_detected': False  # Flag for webhook/GHL
         }
         
         # Add debug flag if in debug mode
@@ -770,7 +971,7 @@ async def submit_lead(
             webhook_data['debug_mode'] = True
             webhook_data['debug_level'] = DEBUG_MODE
         
-        # Send to webhook (may be skipped if DEBUG_MODE is TRUE_NO_GHL)
+        # Send to webhook
         webhook_result = await send_to_webhook(webhook_data)
         
         if webhook_result['success']:
@@ -781,6 +982,7 @@ async def submit_lead(
             return {
                 "status": "success",
                 "message": f"{source.title()} lead submitted successfully",
+                "duplicate_detected": False,
                 "email_sent": email_result['success'],
                 "sms_sent": sms_success,
                 "webhook_response": webhook_result['response'],
@@ -801,6 +1003,7 @@ async def submit_lead(
                 status_code=effective_status_code, 
                 detail={
                     "message": "Failed to process submission",
+                    "duplicate_detected": False,
                     "email_sent": email_result['success'],
                     "sms_sent": sms_success,
                     "webhook_error": webhook_result,
@@ -830,7 +1033,8 @@ async def warm_server(request: Request):
         "timestamp": datetime.now().isoformat(),
         "message": "Server is alive and ready",
         "debug_mode": is_debug_mode(),
-        "debug_level": DEBUG_MODE if is_debug_mode() else None
+        "debug_level": DEBUG_MODE if is_debug_mode() else None,
+        "duplicate_detection_entries": len(duplicate_detection_storage)
     }
 
 @app.post("/chat-docsbot")
@@ -1030,9 +1234,9 @@ async def chat_with_chatbase(
             "messages": chatbase_messages,
             "chatbotId": CHATBASE_CHATBOT_ID,
             "stream": False,
-            "temperature": 0.1,  # Low temperature for consistent legal responses
-            "conversationId": conversation_id,  # For conversation tracking
-            "model": "gpt-4o-mini"  # Cost-effective model
+            "temperature": 0.1,
+            "conversationId": conversation_id,
+            "model": "gpt-4o-mini"
         }
         
         print(f"Sending to Chatbase API: {json.dumps(request_body, indent=2)}")
@@ -1065,7 +1269,7 @@ async def chat_with_chatbase(
             "event": "lookup_answer",
             "data": {
                 "answer": chatbase_text,
-                "sources": []  # Chatbase doesn't return sources in the same way
+                "sources": []
             }
         }]
         
@@ -1100,6 +1304,11 @@ async def health_check():
         "service": "Law Firm Chatbot API",
         "debug_mode": is_debug_mode(),
         "debug_level": DEBUG_MODE if is_debug_mode() else None,
+        "duplicate_detection": {
+            "active_entries": len(duplicate_detection_storage),
+            "detection_window_seconds": DUPLICATE_DETECTION_WINDOW,
+            "cleanup_interval_seconds": DUPLICATE_CLEANUP_INTERVAL
+        },
         "debug_config": {
             "debug_phone_configured": bool(DEBUG_PHONE_NUMBER),
             "debug_email_configured": bool(DEBUG_EMAIL),
@@ -1168,6 +1377,12 @@ if __name__ == "__main__":
     print(f"DEBUG_MODE: {DEBUG_MODE}")
     print(f"Debug mode active: {is_debug_mode()}")
     print(f"Webhook will be skipped: {should_skip_webhook()}")
+    
+    # Duplicate detection configuration
+    print(f"\n=== DUPLICATE DETECTION CONFIGURATION ===")
+    print(f"Detection window: {DUPLICATE_DETECTION_WINDOW} seconds ({DUPLICATE_DETECTION_WINDOW/60:.1f} minutes)")
+    print(f"Cleanup interval: {DUPLICATE_CLEANUP_INTERVAL} seconds ({DUPLICATE_CLEANUP_INTERVAL/60:.1f} minutes)")
+    print(f"Active duplicate entries: {len(duplicate_detection_storage)}")
     
     if is_debug_mode():
         print(f"DEBUG_PHONE_NUMBER: {'✓ Configured' if DEBUG_PHONE_NUMBER else '✗ Not configured'}")
