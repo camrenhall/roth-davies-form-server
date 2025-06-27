@@ -12,6 +12,10 @@ from collections import defaultdict
 import time
 import re
 import hashlib
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 app = FastAPI()
 
@@ -46,6 +50,10 @@ DEBUG_EMAIL = os.getenv("DEBUG_EMAIL")  # Email address for debug emails
 CHATBASE_API_KEY = os.getenv("CHATBASE_API_KEY")
 CHATBASE_CHATBOT_ID = os.getenv("CHATBASE_CHATBOT_ID")
 CHATBASE_BASE_URL = "https://www.chatbase.co/api/v1"
+
+# Google Sheets Environment Variables
+GOOGLE_SHEETS_TOKEN = os.getenv("GOOGLE_SHEETS_TOKEN")
+GOOGLE_SHEETS_SPREADSHEET_ID = os.getenv("GOOGLE_SHEETS_SPREADSHEET_ID")
 
 # Resend configuration
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
@@ -805,11 +813,27 @@ async def submit_lead(
             if is_spam:
                 print(f"SPAM DETECTED: Form submission from {name} ({email}) - rejected silently")
                 # Return fake success to avoid giving spammers feedback about detection
+                # ============ NEW: LOG SPAM TO GOOGLE SHEETS ============ 
+                # Log spam leads for auditing purposes
+                print(f"SPAM AUDIT: Logging spam submission to Google Sheets for {name} ({email})")
+                
+                # Log to Google Sheets asynchronously (won't block main flow)
+                asyncio.create_task(log_to_google_sheets(
+                    name=name,
+                    email=email or "",
+                    phone=phone or "",
+                    case_description=f"[SPAM DETECTED] {about_case}",
+                    source=source
+                ))
+                
+                # ============ END SPAM LOGGING ============
                 return {
                     "status": "success",  # Lie to the spammer
                     "message": "Form submitted successfully",
                     "timestamp": datetime.now().isoformat()
                 }
+                
+            
         
         # DETAILED VALIDATION ONLY AFTER spam filtering
         # Now we know it's legitimate, so validation errors represent real issues
@@ -1315,6 +1339,111 @@ async def health_check():
             "webhook_will_be_skipped": should_skip_webhook()
         } if is_debug_mode() else None
     }
+    
+class GoogleSheetsLogger:
+    def __init__(self):
+        """Initialize Google Sheets logger with token from environment variable"""
+        self.scopes = ['https://www.googleapis.com/auth/spreadsheets']
+        self.service = None
+        self.spreadsheet_id = GOOGLE_SHEETS_SPREADSHEET_ID
+        self._authenticate()
+    
+    def _authenticate(self):
+        """Handle authentication using token from environment variable"""
+        try:
+            if not GOOGLE_SHEETS_TOKEN:
+                print("WARNING: GOOGLE_SHEETS_TOKEN not configured - Google Sheets logging disabled")
+                return
+            
+            # Parse the token JSON from environment variable
+            token_data = json.loads(GOOGLE_SHEETS_TOKEN)
+            
+            # Create credentials from the token data
+            creds = Credentials.from_authorized_user_info(token_data, self.scopes)
+            
+            # Refresh token if expired
+            if not creds.valid:
+                if creds.expired and creds.refresh_token:
+                    print("Refreshing expired Google Sheets token...")
+                    creds.refresh(Request())
+                    print("Google Sheets token refreshed successfully")
+                else:
+                    raise Exception("Google Sheets credentials are invalid and cannot be refreshed")
+            
+            # Build the service
+            self.service = build('sheets', 'v4', credentials=creds)
+            print("Google Sheets service initialized successfully")
+            
+        except json.JSONDecodeError as e:
+            print(f"Error parsing GOOGLE_SHEETS_TOKEN JSON: {e}")
+            print("Google Sheets logging disabled")
+        except Exception as e:
+            print(f"Google Sheets authentication failed: {e}")
+            print("Google Sheets logging disabled")
+    
+    def log_case_entry(self, name: str, email: str, phone: str, case_description: str, source: str):
+        """
+        Log a case entry to Google Sheets (for spam auditing)
+        
+        Args:
+            name: Client name
+            email: Client email  
+            phone: Client phone number
+            case_description: Description of the case (will include [SPAM DETECTED] prefix for spam)
+            source: "form" or "chatbot"
+        """
+        if not self.service:
+            print("Google Sheets service not available - skipping spam audit logging")
+            return False
+        
+        try:
+            # Add timestamp for spam audit trail
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            # Prepare row data: Name, Email, Phone (Optional), Timestamp, Case Description
+            row_data = [
+                name,
+                email or "",
+                phone or "",
+                timestamp,  # Timestamp comes before case description
+                f"[{source.upper()}] {case_description}"
+            ]
+            
+            # Append to the sheet
+            body = {'values': [row_data]}
+            
+            result = self.service.spreadsheets().values().append(
+                spreadsheetId=self.spreadsheet_id,
+                range="Sheet1!A:A",  # This finds the first empty row
+                valueInputOption='RAW',
+                insertDataOption='INSERT_ROWS',
+                body=body
+            ).execute()
+            
+            print(f"✅ Logged SPAM to Google Sheets: {name} ({email}) - {source} submission")
+            return True
+            
+        except HttpError as e:
+            print(f"Google Sheets API error: {e}")
+            return False
+        except Exception as e:
+            print(f"Error logging SPAM to Google Sheets: {e}")
+            return False
+
+# Initialize the Google Sheets logger globally
+sheets_logger = GoogleSheetsLogger()
+
+# Add this function to log legitimate leads to Google Sheets
+async def log_to_google_sheets(name: str, email: str, phone: str, case_description: str, source: str):
+    """
+    Log legitimate lead to Google Sheets in a separate async call
+    This won't block the main flow if Sheets API is slow
+    """
+    try:
+        sheets_logger.log_case_entry(name, email, phone, case_description, source)
+    except Exception as e:
+        print(f"Error in Google Sheets logging: {e}")
+        # Don't let Sheets errors affect the main flow
 
 if __name__ == "__main__":
     # Check for required environment variables

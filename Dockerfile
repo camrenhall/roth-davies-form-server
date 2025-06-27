@@ -8,7 +8,15 @@ RUN pip install --no-cache-dir \
     requests \
     openai \ 
     mailersend \
-    python-dotenv
+    python-dotenv \
+    google-auth \
+    google-auth-oauthlib \
+    google-auth-httplib2 \
+    google-api-python-client \
+    google_auth_oauthlib \
+    google-cloud \
+    google-cloud-vision
+
 
 WORKDIR /app
 COPY . /app
