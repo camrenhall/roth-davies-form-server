@@ -12,7 +12,7 @@ from collections import defaultdict
 import time
 import re
 import hashlib
-from google.auth.transport.requests import Request
+from google.auth.transport.requests import Request as GoogleRequest
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -1365,7 +1365,7 @@ class GoogleSheetsLogger:
             if not creds.valid:
                 if creds.expired and creds.refresh_token:
                     print("Refreshing expired Google Sheets token...")
-                    creds.refresh(Request())
+                    creds.refresh(GoogleRequest())
                     print("Google Sheets token refreshed successfully")
                 else:
                     raise Exception("Google Sheets credentials are invalid and cannot be refreshed")
