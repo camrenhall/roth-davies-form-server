@@ -818,11 +818,12 @@ async def submit_lead(
                 print(f"SPAM AUDIT: Logging spam submission to Google Sheets for {name} ({email})")
                 
                 # Log to Google Sheets asynchronously (won't block main flow)
+                # Log to Google Sheets asynchronously (won't block main flow)
                 asyncio.create_task(log_to_google_sheets(
                     name=name,
                     email=email or "",
                     phone=phone or "",
-                    case_description=f"[SPAM DETECTED] {about_case}",
+                    case_description=about_case,  # Remove the [SPAM DETECTED] prefix
                     source=source
                 ))
                 
@@ -1389,7 +1390,7 @@ class GoogleSheetsLogger:
             name: Client name
             email: Client email  
             phone: Client phone number
-            case_description: Description of the case (will include [SPAM DETECTED] prefix for spam)
+            case_description: Description of the case
             source: "form" or "chatbot"
         """
         if not self.service:
@@ -1405,8 +1406,8 @@ class GoogleSheetsLogger:
                 name,
                 email or "",
                 phone or "",
-                timestamp,  # Timestamp comes before case description
-                f"[{source.upper()}] {case_description}"
+                timestamp,
+                case_description  # Clean case description without tags
             ]
             
             # Append to the sheet
