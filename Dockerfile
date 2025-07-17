@@ -15,7 +15,8 @@ RUN pip install --no-cache-dir \
     google-api-python-client \
     google_auth_oauthlib \
     google-cloud \
-    google-cloud-vision
+    google-cloud-vision \
+    pydantic[email]
 
 
 WORKDIR /app
