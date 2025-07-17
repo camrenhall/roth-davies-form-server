@@ -765,57 +765,6 @@ async def send_sms_notification(phone_number: str, user_name: str, source: str, 
         await send_error_alert(error_msg, "/submit-lead")
         return False
     
-    
-@app.post("/webhook/opportunity-stage-change")
-async def handle_opportunity_webhook(payload: GhlOpportunityWebhook):
-    """
-    Receives a webhook from GoHighLevel when an opportunity stage changes
-    and triggers an email to the specified lawyer.
-    """
-    # --- Security Check (Highly Recommended) ---
-    # This ensures only GoHighLevel can trigger this endpoint.
-    GHL_WEBHOOK_API_KEY = os.getenv("GHL_WEBHOOK_API_KEY")
-    if GHL_WEBHOOK_API_KEY and payload.api_key != GHL_WEBHOOK_API_KEY:
-        print(f"FORBIDDEN: Invalid API key received on /webhook/opportunity-stage-change.")
-        raise HTTPException(status_code=403, detail="Invalid API Key")
-
-    print(f"Received opportunity stage change webhook. Preparing email for: {payload.to_email}")
-
-    try:
-        # --- Reuse Your Existing Email Logic ---
-        # Call the send_email_via_resend function with data from the webhook.
-        # Note: This function already handles the [DEBUG] prefix if debug mode is active.
-        email_result = await send_email_via_resend(
-            to_email=payload.to_email,
-            subject=payload.subject,
-            html_content=payload.html_content
-        )
-
-        if not email_result.get("success"):
-            # If sending failed, log it and return a server error
-            error_details = email_result.get("error", "Unknown email sending error.")
-            print(f"ERROR: Failed to send opportunity email. Details: {error_details}")
-            # Optionally, send an alert to the admin
-            await send_error_alert(
-                f"GHL Webhook email failed: {error_details}",
-                "/webhook/opportunity-stage-change"
-            )
-            raise HTTPException(status_code=500, detail=f"Failed to send email: {error_details}")
-
-        # --- Success Response ---
-        print(f"Successfully dispatched opportunity email to {payload.to_email}")
-        return {
-            "status": "success",
-            "message": "Email for opportunity stage change has been dispatched."
-        }
-
-    except Exception as e:
-        print(f"CRITICAL ERROR in opportunity webhook endpoint: {e}")
-        await send_error_alert(
-            f"GHL Webhook endpoint failed: {str(e)}",
-            "/webhook/opportunity-stage-change"
-        )
-        raise HTTPException(status_code=500, detail="An internal server error occurred.")
 
 # ----- CONSOLIDATED LEAD SUBMISSION ENDPOINT -----
 
@@ -1405,6 +1354,58 @@ class GhlOpportunityWebhook(BaseModel):
     html_content: str
     # Recommended: A simple secret key to ensure the request is from GHL
     api_key: Optional[str] = None
+    
+@app.post("/webhook/opportunity-stage-change")
+async def handle_opportunity_webhook(payload: GhlOpportunityWebhook):
+    """
+    Receives a webhook from GoHighLevel when an opportunity stage changes
+    and triggers an email to the specified lawyer.
+    """
+    # --- Security Check (Highly Recommended) ---
+    # This ensures only GoHighLevel can trigger this endpoint.
+    GHL_WEBHOOK_API_KEY = os.getenv("GHL_WEBHOOK_API_KEY")
+    if GHL_WEBHOOK_API_KEY and payload.api_key != GHL_WEBHOOK_API_KEY:
+        print(f"FORBIDDEN: Invalid API key received on /webhook/opportunity-stage-change.")
+        raise HTTPException(status_code=403, detail="Invalid API Key")
+
+    print(f"Received opportunity stage change webhook. Preparing email for: {payload.to_email}")
+
+    try:
+        # --- Reuse Your Existing Email Logic ---
+        # Call the send_email_via_resend function with data from the webhook.
+        # Note: This function already handles the [DEBUG] prefix if debug mode is active.
+        email_result = await send_email_via_resend(
+            to_email=payload.to_email,
+            subject=payload.subject,
+            html_content=payload.html_content
+        )
+
+        if not email_result.get("success"):
+            # If sending failed, log it and return a server error
+            error_details = email_result.get("error", "Unknown email sending error.")
+            print(f"ERROR: Failed to send opportunity email. Details: {error_details}")
+            # Optionally, send an alert to the admin
+            await send_error_alert(
+                f"GHL Webhook email failed: {error_details}",
+                "/webhook/opportunity-stage-change"
+            )
+            raise HTTPException(status_code=500, detail=f"Failed to send email: {error_details}")
+
+        # --- Success Response ---
+        print(f"Successfully dispatched opportunity email to {payload.to_email}")
+        return {
+            "status": "success",
+            "message": "Email for opportunity stage change has been dispatched."
+        }
+
+    except Exception as e:
+        print(f"CRITICAL ERROR in opportunity webhook endpoint: {e}")
+        await send_error_alert(
+            f"GHL Webhook endpoint failed: {str(e)}",
+            "/webhook/opportunity-stage-change"
+        )
+        raise HTTPException(status_code=500, detail="An internal server error occurred.")
+
     
 class GoogleSheetsLogger:
     def __init__(self):
