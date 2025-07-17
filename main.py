@@ -1344,40 +1344,40 @@ async def health_check():
         } if is_debug_mode() else None
     }
     
-class GhlOpportunityWebhook(BaseModel):
-    """
-    Defines the expected JSON payload from the GoHighLevel
-    "Opportunity Stage Changed" webhook.
-    """
-    to_email: EmailStr  # Pydantic validates this is a proper email format
+# This model defines the fields YOU are putting in the GHL webhook's custom data
+class CustomWebhookData(BaseModel):
+    to_email: EmailStr
     subject: str
     html_content: str
-    # Recommended: A simple secret key to ensure the request is from GHL
     api_key: Optional[str] = None
+
+# This model represents the ENTIRE payload GHL sends, including the "standard data"
+class GhlStandardWebhookPayload(BaseModel):
+    customData: CustomWebhookData
+    contact_id: Optional[str] = None
+    opportunity_name: Optional[str] = None
+    # You can add other standard fields here if you need them
     
 @app.post("/webhook/opportunity-stage-change")
-async def handle_opportunity_webhook(payload: GhlOpportunityWebhook):
+async def handle_opportunity_webhook(payload: GhlStandardWebhookPayload):
     """
-    Receives a webhook from GoHighLevel when an opportunity stage changes
-    and triggers an email to the specified lawyer.
+    Receives a standard GHL webhook and processes the nested customData.
     """
-    # --- Security Check (Highly Recommended) ---
-    # This ensures only GoHighLevel can trigger this endpoint.
+    # --- Access data through payload.customData ---
     GHL_WEBHOOK_API_KEY = os.getenv("GHL_WEBHOOK_API_KEY")
-    if GHL_WEBHOOK_API_KEY and payload.api_key != GHL_WEBHOOK_API_KEY:
+    if GHL_WEBHOOK_API_KEY and payload.customData.api_key != GHL_WEBHOOK_API_KEY:
         print(f"FORBIDDEN: Invalid API key received on /webhook/opportunity-stage-change.")
         raise HTTPException(status_code=403, detail="Invalid API Key")
 
-    print(f"Received opportunity stage change webhook. Preparing email for: {payload.to_email}")
+    print(f"Received opportunity stage change webhook. Preparing email for: {payload.customData.to_email}")
 
     try:
         # --- Reuse Your Existing Email Logic ---
         # Call the send_email_via_resend function with data from the webhook.
-        # Note: This function already handles the [DEBUG] prefix if debug mode is active.
         email_result = await send_email_via_resend(
-            to_email=payload.to_email,
-            subject=payload.subject,
-            html_content=payload.html_content
+            to_email=payload.customData.to_email,
+            subject=payload.customData.subject,
+            html_content=payload.customData.html_content
         )
 
         if not email_result.get("success"):
@@ -1392,7 +1392,7 @@ async def handle_opportunity_webhook(payload: GhlOpportunityWebhook):
             raise HTTPException(status_code=500, detail=f"Failed to send email: {error_details}")
 
         # --- Success Response ---
-        print(f"Successfully dispatched opportunity email to {payload.to_email}")
+        print(f"Successfully dispatched opportunity email to {payload.customData.to_email}")
         return {
             "status": "success",
             "message": "Email for opportunity stage change has been dispatched."
