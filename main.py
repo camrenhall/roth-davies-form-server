@@ -16,7 +16,6 @@ from google.auth.transport.requests import Request as GoogleRequest
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from pydantic import BaseModel, EmailStr
 
 app = FastAPI()
 
@@ -76,7 +75,6 @@ duplicate_detection_storage = {}  # {submission_hash: timestamp}
 DUPLICATE_DETECTION_WINDOW = 600  # 10 minutes in seconds
 DUPLICATE_CLEANUP_INTERVAL = 300  # Clean up old entries every 5 minutes
 last_cleanup_time = time.time()
-
 
 def normalize_phone(phone: str) -> str:
     """
@@ -764,7 +762,6 @@ async def send_sms_notification(phone_number: str, user_name: str, source: str, 
         print(error_msg)
         await send_error_alert(error_msg, "/submit-lead")
         return False
-    
 
 # ----- CONSOLIDATED LEAD SUBMISSION ENDPOINT -----
 
@@ -1343,69 +1340,6 @@ async def health_check():
             "webhook_will_be_skipped": should_skip_webhook()
         } if is_debug_mode() else None
     }
-    
-# This model defines the fields YOU are putting in the GHL webhook's custom data
-class CustomWebhookData(BaseModel):
-    to_email: EmailStr
-    subject: str
-    html_content: str
-    api_key: Optional[str] = None
-
-# This model represents the ENTIRE payload GHL sends, including the "standard data"
-class GhlStandardWebhookPayload(BaseModel):
-    customData: CustomWebhookData
-    contact_id: Optional[str] = None
-    opportunity_name: Optional[str] = None
-    # You can add other standard fields here if you need them
-    
-@app.post("/webhook/opportunity-stage-change")
-async def handle_opportunity_webhook(payload: GhlStandardWebhookPayload):
-    """
-    Receives a standard GHL webhook and processes the nested customData.
-    """
-    # --- Access data through payload.customData ---
-    GHL_WEBHOOK_API_KEY = os.getenv("GHL_WEBHOOK_API_KEY")
-    if GHL_WEBHOOK_API_KEY and payload.customData.api_key != GHL_WEBHOOK_API_KEY:
-        print(f"FORBIDDEN: Invalid API key received on /webhook/opportunity-stage-change.")
-        raise HTTPException(status_code=403, detail="Invalid API Key")
-
-    print(f"Received opportunity stage change webhook. Preparing email for: {payload.customData.to_email}")
-
-    try:
-        # --- Reuse Your Existing Email Logic ---
-        # Call the send_email_via_resend function with data from the webhook.
-        email_result = await send_email_via_resend(
-            to_email=payload.customData.to_email,
-            subject=payload.customData.subject,
-            html_content=payload.customData.html_content
-        )
-
-        if not email_result.get("success"):
-            # If sending failed, log it and return a server error
-            error_details = email_result.get("error", "Unknown email sending error.")
-            print(f"ERROR: Failed to send opportunity email. Details: {error_details}")
-            # Optionally, send an alert to the admin
-            await send_error_alert(
-                f"GHL Webhook email failed: {error_details}",
-                "/webhook/opportunity-stage-change"
-            )
-            raise HTTPException(status_code=500, detail=f"Failed to send email: {error_details}")
-
-        # --- Success Response ---
-        print(f"Successfully dispatched opportunity email to {payload.customData.to_email}")
-        return {
-            "status": "success",
-            "message": "Email for opportunity stage change has been dispatched."
-        }
-
-    except Exception as e:
-        print(f"CRITICAL ERROR in opportunity webhook endpoint: {e}")
-        await send_error_alert(
-            f"GHL Webhook endpoint failed: {str(e)}",
-            "/webhook/opportunity-stage-change"
-        )
-        raise HTTPException(status_code=500, detail="An internal server error occurred.")
-
     
 class GoogleSheetsLogger:
     def __init__(self):
