@@ -4,18 +4,11 @@ FROM python:3.13-slim
 RUN pip install --no-cache-dir \
     fastapi \
     uvicorn \
-    python-multipart \
     requests \
-    openai \ 
-    mailersend \
-    python-dotenv \
+    openai \
+    python-multipart \
     google-auth \
-    google-auth-oauthlib \
-    google-auth-httplib2 \
-    google-api-python-client \
-    google_auth_oauthlib \
-    google-cloud \
-    google-cloud-vision
+    google-api-python-client
 
 
 WORKDIR /app
