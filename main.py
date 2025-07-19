@@ -57,6 +57,7 @@ GOOGLE_SHEETS_SPREADSHEET_ID = os.getenv("GOOGLE_SHEETS_SPREADSHEET_ID")
 
 # Resend configuration
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
+GHL_WEBHOOK_API_KEY = os.getenv("GHL_WEBHOOK_API_KEY")
 RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL")
 RESEND_FROM_NAME = os.getenv("RESEND_FROM_NAME", "Roth Davies Law Firm")
 FIRM_NOTIFICATION_EMAIL = os.getenv("FIRM_NOTIFICATION_EMAIL")
@@ -767,29 +768,64 @@ async def send_sms_notification(phone_number: str, user_name: str, source: str, 
 
 @app.post("/webhook/opportunity-stage-change")
 async def handle_opportunity_stage_change(request: Request):
-    """Simple webhook to log GoHighLevel opportunity stage change payload"""
+    """Handle GoHighLevel opportunity stage change webhook and send email"""
+    client_ip = request.client.host
+    
+    if not check_rate_limit(client_ip):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    
     try:
-        # Get raw body
-        raw_body = await request.body()
+        payload = await request.json()
         
-        # Try to parse as JSON, fallback to form data
-        try:
-            payload = await request.json()
-        except:
-            form_data = await request.form()
-            payload = dict(form_data)
+        # Extract email data from customData
+        custom_data = payload.get('customData', {})
+        to_email = custom_data.get('to_email')
+        subject = custom_data.get('subject') 
+        html_content = custom_data.get('html_content')
+        api_key = custom_data.get('api_key')
         
-        print("=" * 50)
-        print("GOHIGHLEVEL WEBHOOK PAYLOAD:")
-        print("=" * 50)
-        print(json.dumps(payload, indent=2, default=str))
-        print("=" * 50)
+        # Validate required fields
+        if not all([to_email, subject, html_content, api_key]):
+            missing = [k for k, v in {
+                'to_email': to_email, 'subject': subject, 
+                'html_content': html_content, 'api_key': api_key
+            }.items() if not v]
+            raise HTTPException(status_code=400, detail=f"Missing required fields in customData: {missing}")
         
-        return {"status": "logged", "timestamp": datetime.now().isoformat()}
+        # Validate API key (security check)
+        if api_key != GHL_WEBHOOK_API_KEY:
+            print(f"Invalid API key in webhook: {api_key}")
+            raise HTTPException(status_code=401, detail="Invalid API key")
         
+        print(f"Sending opportunity stage change email to: {to_email}")
+        print(f"Subject: {subject}")
+        
+        # Send email using existing Resend function
+        email_result = await send_email_via_resend(
+            to_email=to_email,
+            subject=subject, 
+            html_content=html_content
+        )
+        
+        if email_result['success']:
+            print("Opportunity stage change email sent successfully")
+            return {
+                "status": "success",
+                "message": "Email sent successfully", 
+                "email_sent": True,
+                "timestamp": datetime.now().isoformat()
+            }
+        else:
+            print(f"Failed to send opportunity stage change email: {email_result.get('error')}")
+            raise HTTPException(status_code=500, detail=f"Email send failed: {email_result.get('error')}")
+            
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"Webhook error: {e}")
-        return {"status": "error", "message": str(e)}
+        error_msg = f"Error processing opportunity stage change webhook: {str(e)}"
+        print(error_msg)
+        await send_error_alert(error_msg, "/webhook/opportunity-stage-change")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 # ----- CONSOLIDATED LEAD SUBMISSION ENDPOINT -----
 
