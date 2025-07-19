@@ -762,6 +762,34 @@ async def send_sms_notification(phone_number: str, user_name: str, source: str, 
         print(error_msg)
         await send_error_alert(error_msg, "/submit-lead")
         return False
+    
+# ----- HANDLE GO HIGH LEVEL PIPELINE STAGE CHANGE EMAIL ENDPOINT -----
+
+@app.post("/webhook/opportunity-stage-change")
+async def handle_opportunity_stage_change(request: Request):
+    """Simple webhook to log GoHighLevel opportunity stage change payload"""
+    try:
+        # Get raw body
+        raw_body = await request.body()
+        
+        # Try to parse as JSON, fallback to form data
+        try:
+            payload = await request.json()
+        except:
+            form_data = await request.form()
+            payload = dict(form_data)
+        
+        print("=" * 50)
+        print("GOHIGHLEVEL WEBHOOK PAYLOAD:")
+        print("=" * 50)
+        print(json.dumps(payload, indent=2, default=str))
+        print("=" * 50)
+        
+        return {"status": "logged", "timestamp": datetime.now().isoformat()}
+        
+    except Exception as e:
+        print(f"Webhook error: {e}")
+        return {"status": "error", "message": str(e)}
 
 # ----- CONSOLIDATED LEAD SUBMISSION ENDPOINT -----
 
